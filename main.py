@@ -3,6 +3,8 @@ import datetime
 import json
 import requests
 from flask import Flask, request, render_template_string, redirect, url_for, Response, stream_with_context, session, abort
+from google.cloud import firestore
+from google_auth_oauthlib.flow import Flow
 
 # --- 1. Initial Setup ---
 app = Flask(__name__)
@@ -14,8 +16,16 @@ GOOGLE_CLIENT_ID = os.environ.get('GOOGLE_CLIENT_ID')
 GOOGLE_CLIENT_SECRET = os.environ.get('GOOGLE_CLIENT_SECRET')
 REDIRECT_URI = os.environ.get('REDIRECT_URI')
 
-# --- 3. Initialize Clients ---
-db = firestore.Client()
+# --- ▼▼▼ BUG FIX: Lazy initialize DB client ▼▼▼ ---
+db = None
+def get_db():
+    global db
+    if db is None:
+        db = firestore.Client()
+    return db
+# --- ▲▲▲ BUG FIX ▲▲▲ ---
+
+# --- Gemini Client ---
 genai = None
 if GEMINI_API_KEY:
     try:
@@ -24,21 +34,22 @@ if GEMINI_API_KEY:
     except ImportError:
         pass
 
+# --- OAuth 2.0 Flow Configuration ---
 os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
 flow = None
 if GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET and REDIRECT_URI:
     flow = Flow.from_client_config(
         client_config={ "web": {
-            "client_id": GOOGLE_CLIENT_ID, "client_secret": GOOGLE_CLIENT_SECRET,
-            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-            "token_uri": "https://oauth2.googleapis.com/token",
-            "redirect_uris": [REDIRECT_URI],
+                "client_id": GOOGLE_CLIENT_ID, "client_secret": GOOGLE_CLIENT_SECRET,
+                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                "token_uri": "https://oauth2.googleapis.com/token",
+                "redirect_uris": [REDIRECT_URI],
         }},
         scopes=["openid", "https://www.googleapis.com/auth/userinfo.email", "https://www.googleapis.com/auth/userinfo.profile"],
         redirect_uri=REDIRECT_URI
     )
 
-# --- 4. HTML Template ---
+# (HTMLとJavaScript部分は変更ありません)
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="ja"><head><title>AI Chat Final</title><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta charset="UTF-8">
@@ -144,7 +155,31 @@ HTML_TEMPLATE = """
                 knowledgeFiles = config.knowledgeFiles || [];
                 renderFileList();
             }
+
+            async function saveSettings() {
+                const settings = {
+                    model_name: document.getElementById('model_name').value,
+                    temperature: document.getElementById('temperature').value,
+                    system_instruction: document.getElementById('system_instruction').value,
+                    knowledgeFiles: knowledgeFiles
+                };
+                try {
+                    await fetch('/save_settings', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(settings)
+                    });
+                } catch (error) { console.error("Failed to save settings:", error); }
+            }
+
+            ['model_name', 'temperature', 'system_instruction'].forEach(id => {
+                const el = document.getElementById(id);
+                el.addEventListener('change', saveSettings);
+                el.addEventListener('input', saveSettings);
+            });
             
+            document.addEventListener('DOMContentLoaded', () => { if(isLoggedIn) loadSettings(); });
+
             fileInput.addEventListener('change', (event) => {
                 const newFiles = Array.from(event.target.files);
                 if (knowledgeFiles.length + newFiles.length > 10) { alert("ファイルは合計10個までです。"); return; }
@@ -154,6 +189,7 @@ HTML_TEMPLATE = """
                         reader.onload = (e) => {
                             knowledgeFiles.push({ name: file.name, content: e.target.result });
                             renderFileList();
+                            saveSettings();
                         };
                         reader.readAsText(file, 'UTF-8');
                     }
@@ -167,7 +203,7 @@ HTML_TEMPLATE = """
                     const fileItem = document.createElement('div'); fileItem.className = 'file-item';
                     const fileNameSpan = document.createElement('span'); fileNameSpan.innerText = file.name;
                     const deleteBtn = document.createElement('button'); deleteBtn.innerText = '×';
-                    deleteBtn.onclick = () => { knowledgeFiles.splice(index, 1); renderFileList(); };
+                    deleteBtn.onclick = () => { knowledgeFiles.splice(index, 1); renderFileList(); saveSettings(); };
                     fileItem.appendChild(fileNameSpan); fileItem.appendChild(deleteBtn); fileListDiv.appendChild(fileItem);
                 });
             }
@@ -222,7 +258,9 @@ HTML_TEMPLATE = """
         });
         document.addEventListener('DOMContentLoaded', () => {
             if (localStorage.getItem('theme') === 'dark') { document.body.classList.add('dark-mode'); }
-            if(isLoggedIn) loadSettings();
+            if(isLoggedIn) {
+                loadSettings();
+            }
             chatHistory.scrollTop = chatHistory.scrollHeight;
         });
     </script>
@@ -237,10 +275,12 @@ def login():
     authorization_url, state = flow.authorization_url(access_type='offline', include_granted_scopes='true')
     session['state'] = state
     return redirect(authorization_url)
+
 @app.route('/logout')
 def logout():
     session.clear()
     return redirect(url_for('home'))
+
 @app.route('/callback')
 def callback():
     if not flow: return "OAuth 2.0 has not been configured in the server environment.", 500
@@ -264,26 +304,33 @@ def home():
     if 'google_id' in session:
         user_data = session
         user_id = session['google_id']
+        db = get_db()
         settings_doc_ref = db.collection('users').document(user_id)
         settings_doc = settings_doc_ref.get()
         
         if settings_doc.exists:
             config = settings_doc.to_dict()
         else:
-            # Firestoreに設定がない新規ユーザーの場合、デフォルト設定を作成して保存
             config = {
-                "model_name": "gemini-1.5-flash",
-                "temperature": 1.0,
-                "system_instruction": "あなたは親切で優秀なAIアシスタントです。",
-                "knowledgeFiles": []
+                "model_name": "gemini-1.5-flash", "temperature": 1.0,
+                "system_instruction": "あなたは親切で優秀なAIアシスタントです。", "knowledgeFiles": []
             }
             settings_doc_ref.set(config)
-
+        
         docs = db.collection('users').document(user_id).collection('conversations').order_by('timestamp').limit(50).stream()
         for doc in docs:
             history.append(doc.to_dict())
             
     return render_template_string(HTML_TEMPLATE, user=user_data, history=history, config=config, flow_available=bool(flow))
+
+# --- API Routes for JavaScript ---
+@app.route('/save_settings', methods=['POST'])
+def save_settings():
+    if 'google_id' not in session: return abort(401)
+    settings = request.get_json()
+    user_id = session['google_id']
+    get_db().collection('users').document(user_id).set(settings, merge=True)
+    return {"status": "success"}
     
 @app.route('/stream_chat', methods=['POST'])
 def stream_chat():
@@ -294,15 +341,14 @@ def stream_chat():
         try:
             data = request.get_json()
             user_prompt = data.get('prompt', "")
-            
-            # ▼▼▼ BUG FIX: チャット送信時に設定をDBに保存する処理をここに集約 ▼▼▼
             settings_to_save = {
                 'model_name': data.get('model_name', 'gemini-1.5-flash'),
                 'temperature': float(data.get('temperature', 1.0)),
                 'system_instruction': data.get('system_instruction', ""),
                 'knowledgeFiles': data.get('knowledge_files', [])
             }
-            db.collection('users').document(user_id).set(settings_to_save)
+            db = get_db()
+            db.collection('users').document(user_id).set(settings_to_save, merge=True)
             
             if not (genai and user_prompt):
                 yield "エラー: 設定が不十分か、プロンプトが空です。"
