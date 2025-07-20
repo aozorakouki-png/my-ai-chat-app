@@ -63,7 +63,7 @@ HTML_TEMPLATE = """
     <div class="wrapper">
         <div class="sidebar">
             <h2>設定</h2>
-            <div id="config-form">
+            <form id="config-form" accept-charset="UTF-8">
                 <label for="model_name">モデル:</label>
                 <select id="model_name" name="model_name">
                     <option value="gemini-1.5-flash" {% if config.model_name == 'gemini-1.5-flash' %}selected{% endif %}>Gemini 1.5 Flash</option>
@@ -77,7 +77,7 @@ HTML_TEMPLATE = """
                 <label for="knowledge_file">知識ファイル (最大10件):</label>
                 <input type="file" id="knowledge_file" name="knowledge_file" accept=".txt" multiple>
                 <div id="file-list"></div>
-            </div>
+            </form>
         </div>
         <div class="chat-wrapper">
             <div class="chat-history" id="chat-history">
@@ -88,7 +88,7 @@ HTML_TEMPLATE = """
                 {% endfor %}
             </div>
             <div class="input-area">
-                <form id="chat-form">
+                <form id="chat-form" accept-charset="UTF-8">
                     <textarea name="prompt" placeholder="メッセージを入力..." required></textarea>
                     <button type="submit">↑</button>
                 </form>
@@ -119,7 +119,7 @@ HTML_TEMPLATE = """
             chatHistory.scrollTop = chatHistory.scrollHeight;
         });
 
-        // --- ▼▼▼ BUG FIX: Multiple File Handling ▼▼▼ ---
+        // --- File Management ---
         fileInput.addEventListener('change', (event) => {
             const newFiles = Array.from(event.target.files);
             if (knowledgeFiles.length + newFiles.length > 10) {
@@ -128,7 +128,6 @@ HTML_TEMPLATE = """
             }
             
             newFiles.forEach(file => {
-                // 同じ名前のファイルが既に存在しないかチェック
                 if (!knowledgeFiles.some(existingFile => existingFile.name === file.name)) {
                     const reader = new FileReader();
                     reader.onload = (e) => {
@@ -138,7 +137,7 @@ HTML_TEMPLATE = """
                     reader.readAsText(file, 'UTF-8');
                 }
             });
-            event.target.value = ''; // inputをリセットして同じファイルを再度選択可能にする
+            event.target.value = '';
         });
 
         function renderFileList() {
@@ -172,11 +171,8 @@ HTML_TEMPLATE = """
 
             const modelBubble = appendMessage('...', 'model');
             
-            const formData = new FormData();
+            const formData = new FormData(configForm);
             formData.append('prompt', userPrompt);
-            formData.append('model_name', document.getElementById('model_name').value);
-            formData.append('temperature', document.getElementById('temperature').value);
-            formData.append('system_instruction', document.getElementById('system_instruction').value);
             const combinedFileContent = knowledgeFiles.map(f => `--- File: ${f.name} ---\\n${f.content}`).join('\\n\\n');
             formData.append('file_content', combinedFileContent);
             
@@ -184,7 +180,7 @@ HTML_TEMPLATE = """
             
             try {
                 const response = await fetch('/stream_chat', { method: 'POST', body: formData });
-                if (!response.ok) throw new Error(`Server error: ${response.status}`);
+                if (!response.ok) throw new Error(`Server error: ${response.status} ${await response.text()}`);
 
                 const reader = response.body.getReader();
                 const decoder = new TextDecoder();
@@ -198,12 +194,13 @@ HTML_TEMPLATE = """
                     modelBubble.querySelector('p').innerText = fullResponse;
                     chatHistory.scrollTop = chatHistory.scrollHeight;
                 }
+                 // 完了後にリロードしてDBから永続化された履歴を再表示
+                 setTimeout(() => window.location.reload(), 1500);
             } catch (error) {
                 modelBubble.querySelector('p').innerText = "エラーが発生しました: " + error;
             }
         });
 
-        // --- ▼▼▼ BUG FIX: appendMessage function ▼▼▼ ---
         function appendMessage(text, role) {
             const messageDiv = document.createElement('div');
             messageDiv.className = `message ${role}-message`;
@@ -212,8 +209,7 @@ HTML_TEMPLATE = """
             const p = document.createElement('p');
             p.innerText = text;
             bubbleDiv.appendChild(p);
-            // This was the bug: messageDiv.appendChild(messageDiv);
-            messageDiv.appendChild(bubbleDiv); // Corrected line
+            messageDiv.appendChild(bubbleDiv);
             chatHistory.appendChild(messageDiv);
             chatHistory.scrollTop = chatHistory.scrollHeight;
             return bubbleDiv;
@@ -232,7 +228,7 @@ HTML_TEMPLATE = """
 </html>
 """
 
-# --- Python Backend (No changes needed, but provided for completeness) ---
+# --- Python Backend (変更なし) ---
 @app.route('/', methods=['GET'])
 def home():
     saved_config = request.cookies.get('ai_config')
@@ -293,7 +289,6 @@ def stream_chat():
             utc_now = datetime.datetime.now(datetime.timezone.utc)
             db.collection('conversations').add({'role': 'user', 'text': user_prompt, 'timestamp': utc_now})
             db.collection('conversations').add({'role': 'model', 'text': full_ai_response, 'timestamp': utc_now + datetime.timedelta(microseconds=1)})
-
         except Exception as e:
             print(f"Error during generation: {e}")
             yield f"API呼び出し中にエラーが発生しました: {e}"
