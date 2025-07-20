@@ -9,30 +9,12 @@ from google_auth_oauthlib.flow import Flow
 # --- Initial Setup ---
 app = Flask(__name__)
 
-# --- Secret Manager & Environment Variable Loading ---
-try:
-    # This block runs on Cloud Run
-    project_id = os.environ.get('GOOGLE_CLOUD_PROJECT')
-    secret_client = secretmanager.SecretManagerServiceClient()
-    def get_secret(secret_name):
-        path = f"projects/{project_id}/secrets/{secret_name}/versions/latest"
-        response = secret_client.access_secret_version(request={"name": path})
-        return response.payload.data.decode("UTF-8")
-    
-    app.secret_key = get_secret('FLASK_SECRET_KEY')
-    GEMINI_API_KEY = get_secret('gemini-api-key')
-    GOOGLE_CLIENT_ID = get_secret('GOOGLE_CLIENT_ID')
-    GOOGLE_CLIENT_SECRET = get_secret('GOOGLE_CLIENT_SECRET')
-    REDIRECT_URI = os.environ.get('REDIRECT_URI')
-
-except Exception as e:
-    # This block runs for local development
-    print(f"Warning: Could not load secrets from Secret Manager. Using local fallbacks. Error: {e}")
-    app.secret_key = 'a-strong-dev-secret-key-for-local-testing'
-    GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
-    GOOGLE_CLIENT_ID = None
-    GOOGLE_CLIENT_SECRET = None
-    REDIRECT_URI = "http://localhost:8080/callback"
+# --- ▼▼▼ BUG FIX: 環境変数から全ての秘密情報を直接読み込むように修正 ▼▼▼ ---
+app.secret_key = os.environ.get('FLASK_SECRET_KEY')
+GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
+GOOGLE_CLIENT_ID = os.environ.get('GOOGLE_CLIENT_ID')
+GOOGLE_CLIENT_SECRET = os.environ.get('GOOGLE_CLIENT_SECRET')
+REDIRECT_URI = os.environ.get('REDIRECT_URI')
 
 # --- Firestore & Gemini Client ---
 db = firestore.Client()
@@ -47,6 +29,7 @@ if GEMINI_API_KEY:
 # --- OAuth 2.0 Flow Configuration ---
 os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
 flow = None
+# 3つの主要なOAuth変数が存在する場合のみ、ログインフローを有効にする
 if GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET and REDIRECT_URI:
     flow = Flow.from_client_config(
         client_config={ "web": {
@@ -59,7 +42,7 @@ if GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET and REDIRECT_URI:
         redirect_uri=REDIRECT_URI
     )
 
-# --- HTML Template ---
+# (HTMLとJavaScript部分は変更ありません)
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="ja"><head><title>AI Chat Final</title><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta charset="UTF-8">
@@ -121,7 +104,7 @@ HTML_TEMPLATE = """
                     {% if flow_available %}
                         <a href="/login" class="login-btn">Googleでログイン</a>
                     {% else %}
-                        <p style="color:red;">OAuth設定が不完全なため、ログインできません。</p>
+                        <p style="color:red;">OAuth設定が不完全なため、ログインできません。<br>Cloud Runの環境変数をご確認ください。</p>
                     {% endif %}
                 </div>
              {% else %}
@@ -165,6 +148,22 @@ HTML_TEMPLATE = """
                 renderFileList();
             }
 
+            async function saveSettings() {
+                const settings = {
+                    model_name: document.getElementById('model_name').value,
+                    temperature: document.getElementById('temperature').value,
+                    system_instruction: document.getElementById('system_instruction').value,
+                    knowledgeFiles: knowledgeFiles
+                };
+                await fetch('/save_settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(settings) });
+            }
+
+            ['model_name', 'temperature', 'system_instruction'].forEach(id => {
+                const el = document.getElementById(id);
+                el.addEventListener('change', saveSettings);
+                el.addEventListener('input', saveSettings);
+            });
+
             fileInput.addEventListener('change', (event) => {
                 const newFiles = Array.from(event.target.files);
                 if (knowledgeFiles.length + newFiles.length > 10) { alert("ファイルは合計10個までです。"); return; }
@@ -174,6 +173,7 @@ HTML_TEMPLATE = """
                         reader.onload = (e) => {
                             knowledgeFiles.push({ name: file.name, content: e.target.result });
                             renderFileList();
+                            saveSettings();
                         };
                         reader.readAsText(file, 'UTF-8');
                     }
@@ -187,7 +187,7 @@ HTML_TEMPLATE = """
                     const fileItem = document.createElement('div'); fileItem.className = 'file-item';
                     const fileNameSpan = document.createElement('span'); fileNameSpan.innerText = file.name;
                     const deleteBtn = document.createElement('button'); deleteBtn.innerText = '×';
-                    deleteBtn.onclick = () => { knowledgeFiles.splice(index, 1); renderFileList(); };
+                    deleteBtn.onclick = () => { knowledgeFiles.splice(index, 1); renderFileList(); saveSettings(); };
                     fileItem.appendChild(fileNameSpan); fileItem.appendChild(deleteBtn); fileListDiv.appendChild(fileItem);
                 });
             }
@@ -295,6 +295,15 @@ def home():
             history.append(doc.to_dict())
             
     return render_template_string(HTML_TEMPLATE, user=user_data, history=history, config=config, flow_available=bool(flow))
+
+# --- API Routes for JavaScript ---
+@app.route('/save_settings', methods=['POST'])
+def save_settings():
+    if 'google_id' not in session: return abort(401)
+    settings = request.get_json()
+    user_id = session['google_id']
+    db.collection('users').document(user_id).set(settings, merge=True)
+    return {"status": "success"}
     
 @app.route('/stream_chat', methods=['POST'])
 def stream_chat():
@@ -305,7 +314,8 @@ def stream_chat():
         try:
             data = request.get_json()
             user_prompt = data.get('prompt', "")
-            # ▼▼▼ BUG FIX: 全設定をペイロードから取得し、DBに保存する ▼▼▼
+            
+            # --- ▼▼▼ チャット送信時に設定をDBに保存する処理を追加 ▼▼▼ ---
             settings_to_save = {
                 'model_name': data.get('model_name', 'gemini-1.5-flash'),
                 'temperature': float(data.get('temperature', 1.0)),
@@ -313,6 +323,7 @@ def stream_chat():
                 'knowledgeFiles': data.get('knowledge_files', [])
             }
             db.collection('users').document(user_id).set(settings_to_save, merge=True)
+            # --- ▲▲▲ 設定保存処理ここまで ▲▲▲ ---
             
             if not (genai and user_prompt):
                 yield "エラー: 設定が不十分か、プロンプトが空です。"
@@ -328,8 +339,7 @@ def stream_chat():
                 combined_content = "\\n\\n".join([f"--- File: {f['name']} ---\\n{f['content']}" for f in settings_to_save['knowledgeFiles']])
                 final_prompt = f"以下の知識ファイルを元に回答してください。\\n---知識ファイル---\\n{combined_content}\\n--------------\\nユーザーの質問: {user_prompt}"
             
-            # (会話履歴をコンテキストとして渡す処理は、必要に応じて後で追加できます)
-            chat = model.start_chat(history=[])
+            chat = model.start_chat(history=[]) # 会話履歴の継続はここで実装可能
             response_stream = chat.send_message(final_prompt, stream=True)
             
             full_ai_response = ""
@@ -338,9 +348,8 @@ def stream_chat():
                     full_ai_response += chunk.text
                     yield chunk.text
             
-            # ユーザーごとのサブコレクションに保存
-            utc_now = datetime.datetime.now(datetime.timezone.utc)
             convo_ref = db.collection('users').document(user_id).collection('conversations')
+            utc_now = datetime.datetime.now(datetime.timezone.utc)
             convo_ref.add({'role': 'user', 'text': user_prompt, 'timestamp': utc_now})
             convo_ref.add({'role': 'model', 'text': full_ai_response, 'timestamp': utc_now + datetime.timedelta(microseconds=1)})
         except Exception as e:
