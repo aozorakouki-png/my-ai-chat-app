@@ -15,8 +15,7 @@ app.secret_key = os.environ.get('FLASK_SECRET_KEY')
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
 GOOGLE_CLIENT_ID = os.environ.get('GOOGLE_CLIENT_ID')
 GOOGLE_CLIENT_SECRET = os.environ.get('GOOGLE_CLIENT_SECRET')
-SERVICE_URL = os.environ.get('SERVICE_URL')
-REDIRECT_URI = f"{SERVICE_URL}/callback" if SERVICE_URL else "http://localhost:8080/callback"
+REDIRECT_URI = os.environ.get('REDIRECT_URI', 'http://localhost:8080/callback')
 
 # --- Firestore & Gemini Client ---
 db = firestore.Client()
