@@ -1,8 +1,7 @@
 import os
 import datetime
 import json
-from flask import Flask, request, render_template_string, make_response, redirect, url_for, Response, stream_with_context
-# ▼▼▼ Cookieの文字化けを修正するためにurllib.parseからunquoteをインポート ▼▼▼
+from flask import Flask, request, render_template_string, Response, stream_with_context
 from urllib.parse import unquote
 
 # Firestore client
@@ -68,14 +67,14 @@ HTML_TEMPLATE = """
             <div id="config-form">
                 <label for="model_name">モデル:</label>
                 <select id="model_name" name="model_name">
-                    <option value="gemini-1.5-flash" {% if config.model_name == 'gemini-1.5-flash' %}selected{% endif %}>Gemini 1.5 Flash</option>
-                    <option value="gemini-1.5-pro" {% if config.model_name == 'gemini-1.5-pro' %}selected{% endif %}>Gemini 1.5 Pro</option>
-                    <option value="gemini-1.0-pro" {% if config.model_name == 'gemini-1.0-pro' %}selected{% endif %}>Gemini 1.0 Pro</option>
+                    <option value="gemini-1.5-flash">Gemini 1.5 Flash</option>
+                    <option value="gemini-1.5-pro">Gemini 1.5 Pro</option>
+                    <option value="gemini-1.0-pro">Gemini 1.0 Pro</option>
                 </select>
                 <label for="temperature">Temperature:</label>
-                <input type="number" id="temperature" name="temperature" min="0" max="2" step="0.1" value="{{ config.temperature }}">
+                <input type="number" id="temperature" name="temperature" min="0" max="2" step="0.1">
                 <label for="system_instruction">System Instruction:</label>
-                <textarea id="system_instruction" name="system_instruction" rows="6">{{ config.system_instruction }}</textarea>
+                <textarea id="system_instruction" name="system_instruction" rows="6"></textarea>
                 <label for="knowledge_file">知識ファイル (最大10件):</label>
                 <input type="file" id="knowledge_file" name="knowledge_file" accept=".txt" multiple>
                 <div id="file-list"></div>
@@ -103,241 +102,4 @@ HTML_TEMPLATE = """
         const chatForm = document.getElementById('chat-form');
         const promptInput = chatForm.querySelector('textarea[name="prompt"]');
         const chatHistory = document.getElementById('chat-history');
-        const fileInput = document.getElementById('knowledge_file');
-        const fileListDiv = document.getElementById('file-list');
-        const themeToggle = document.getElementById('theme-toggle');
-        let knowledgeFiles = [];
-
-        // --- Theme Management ---
-        themeToggle.addEventListener('click', () => {
-            document.body.classList.toggle('dark-mode');
-            localStorage.setItem('theme', document.body.classList.contains('dark-mode') ? 'dark' : 'light');
-        });
-        document.addEventListener('DOMContentLoaded', () => {
-            // Restore theme
-            if (localStorage.getItem('theme') === 'dark') {
-                document.body.classList.add('dark-mode');
-            }
-            // Restore settings from cookie
-            const savedConfig = getCookie('ai_config');
-            if (savedConfig) {
-                document.getElementById('model_name').value = savedConfig.model_name || 'gemini-1.5-flash';
-                document.getElementById('temperature').value = savedConfig.temperature || 1.0;
-                document.getElementById('system_instruction').value = savedConfig.system_instruction || '';
-                if (savedConfig.knowledgeFiles) {
-                    knowledgeFiles = savedConfig.knowledgeFiles;
-                    renderFileList();
-                }
-            }
-            chatHistory.scrollTop = chatHistory.scrollHeight;
-        });
-
-        // --- File Management ---
-        fileInput.addEventListener('change', (event) => {
-            const newFiles = Array.from(event.target.files);
-            if (knowledgeFiles.length + newFiles.length > 10) {
-                alert("ファイルは合計10個までです。");
-                return;
-            }
-            newFiles.forEach(file => {
-                if (!knowledgeFiles.some(f => f.name === file.name)) {
-                    const reader = new FileReader();
-                    reader.onload = (e) => {
-                        knowledgeFiles.push({ name: file.name, content: e.target.result });
-                        renderFileList();
-                        saveConfigToCookie();
-                    };
-                    reader.readAsText(file, 'UTF-8');
-                }
-            });
-            event.target.value = '';
-        });
-
-        function renderFileList() {
-            fileListDiv.innerHTML = '';
-            knowledgeFiles.forEach((file, index) => {
-                const fileItem = document.createElement('div');
-                fileItem.className = 'file-item';
-                const fileNameSpan = document.createElement('span');
-                fileNameSpan.innerText = file.name;
-                const deleteBtn = document.createElement('button');
-                deleteBtn.innerText = '×';
-                deleteBtn.onclick = () => {
-                    knowledgeFiles.splice(index, 1);
-                    renderFileList();
-                    saveConfigToCookie();
-                };
-                fileItem.appendChild(fileNameSpan);
-                fileItem.appendChild(deleteBtn);
-                fileListDiv.appendChild(fileItem);
-            });
-        }
-        
-        // --- Chat Submission ---
-        chatForm.addEventListener('submit', async function(event) {
-            event.preventDefault();
-            const userPrompt = promptInput.value.trim();
-            if (!userPrompt) return;
-
-            appendMessage(userPrompt, 'user');
-            promptInput.value = '';
-            promptInput.style.height = 'auto';
-
-            const modelBubble = appendMessage('...', 'model');
-            
-            const payload = {
-                prompt: userPrompt,
-                model_name: document.getElementById('model_name').value,
-                temperature: document.getElementById('temperature').value,
-                system_instruction: document.getElementById('system_instruction').value,
-                knowledge_files: knowledgeFiles
-            };
-            
-            saveConfigToCookie();
-            
-            try {
-                const response = await fetch('/stream_chat', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(payload)
-                });
-                if (!response.ok) throw new Error(`Server error: ${response.status} ${await response.text()}`);
-
-                const reader = response.body.getReader();
-                const decoder = new TextDecoder();
-                let fullResponse = "";
-                modelBubble.querySelector('p').innerText = "";
-                while (true) {
-                    const { value, done } = await reader.read();
-                    if (done) break;
-                    const chunk = decoder.decode(value, {stream: true});
-                    fullResponse += chunk;
-                    modelBubble.querySelector('p').innerText = fullResponse;
-                    chatHistory.scrollTop = chatHistory.scrollHeight;
-                }
-            } catch (error) {
-                modelBubble.querySelector('p').innerText = "エラーが発生しました: " + error;
-            }
-        });
-
-        function appendMessage(text, role) {
-            const messageDiv = document.createElement('div');
-            messageDiv.className = `message ${role}-message`;
-            const bubbleDiv = document.createElement('div');
-            bubbleDiv.className = 'message-bubble';
-            const p = document.createElement('p');
-            p.innerText = text;
-            bubbleDiv.appendChild(p);
-            messageDiv.appendChild(bubbleDiv);
-            chatHistory.appendChild(messageDiv);
-            chatHistory.scrollTop = chatHistory.scrollHeight;
-            return bubbleDiv;
-        }
-        
-        // --- Cookie Management ---
-        function saveConfigToCookie() {
-            const config = {
-                model_name: document.getElementById('model_name').value,
-                temperature: document.getElementById('temperature').value,
-                system_instruction: document.getElementById('system_instruction').value,
-                knowledgeFiles: knowledgeFiles
-            };
-            document.cookie = `ai_config=${encodeURIComponent(JSON.stringify(config))}; max-age=31536000; path=/; SameSite=Lax`;
-        }
-
-        function getCookie(name) {
-            const value = `; ${document.cookie}`;
-            const parts = value.split(`; ${name}=`);
-            if (parts.length === 2) {
-                try {
-                    return JSON.parse(decodeURIComponent(parts.pop().split(';').shift()));
-                } catch (e) {
-                    return null;
-                }
-            }
-            return null;
-        }
-    </script>
-</body>
-</html>
-"""
-
-# --- Python Backend ---
-@app.route('/', methods=['GET'])
-def home():
-    # ▼▼▼ BUG FIX: Decode cookie correctly on the server-side ▼▼▼
-    saved_config_encoded = request.cookies.get('ai_config')
-    config = {}
-    if saved_config_encoded:
-        try:
-            # First, URL-decode the string, then parse the JSON
-            saved_config_decoded = unquote(saved_config_encoded)
-            config = json.loads(saved_config_decoded)
-        except (json.JSONDecodeError, TypeError):
-            # If cookie is broken, start with an empty config
-            pass
-    
-    # Set default values for any missing keys
-    config.setdefault('model_name', 'gemini-1.5-flash')
-    config.setdefault('temperature', 1.0)
-    config.setdefault('system_instruction', "あなたは親切で優秀なAIアシスタントです。")
-    # knowledgeFiles is handled by JavaScript, so we don't need a server-side default for it
-
-    display_history = []
-    try:
-        docs = db.collection('conversations').order_by('timestamp').stream()
-        for doc in docs:
-            display_history.append(doc.to_dict())
-    except Exception as e:
-        print(f"Error fetching history: {e}")
-        
-    return render_template_string(HTML_TEMPLATE, history=display_history, config=config)
-
-@app.route('/stream_chat', methods=['POST'])
-def stream_chat():
-    def generate():
-        try:
-            data = request.get_json()
-            user_prompt = data.get('prompt', "")
-            model_name = data.get('model_name', 'gemini-1.5-flash')
-            system_instruction = data.get('system_instruction', "")
-            temperature = float(data.get('temperature', 1.0))
-            knowledge_files = data.get('knowledge_files', [])
-            
-            api_key = os.environ.get('GEMINI_API_KEY')
-            if not (api_key and genai and user_prompt):
-                yield "エラー: サーバー設定が不十分か、プロンプトが空です。"
-                return
-
-            full_ai_response = ""
-            
-            genai.configure(api_key=api_key)
-            model = genai.GenerativeModel(
-                model_name=model_name,
-                generation_config=genai.GenerationConfig(temperature=temperature),
-                system_instruction=system_instruction,
-            )
-
-            final_prompt = user_prompt
-            if knowledge_files:
-                combined_file_content = "\n\n".join([f"--- File: {f['name']} ---\n{f['content']}" for f in knowledge_files])
-                final_prompt = f"以下の知識ファイルを元に回答してください。\n---知識ファイル---\n{combined_file_content}\n--------------\nユーザーの質問: {user_prompt}"
-
-            response_stream = model.generate_content(final_prompt, stream=True)
-            
-            for chunk in response_stream:
-                if chunk.text:
-                    full_ai_response += chunk.text
-                    yield chunk.text
-            
-            utc_now = datetime.datetime.now(datetime.timezone.utc)
-            db.collection('conversations').add({'role': 'user', 'text': user_prompt, 'timestamp': utc_now})
-            db.collection('conversations').add({'role': 'model', 'text': full_ai_response, 'timestamp': utc_now + datetime.timedelta(microseconds=1)})
-        except Exception as e:
-            print(f"Error during generation: {e}")
-            yield f"API呼び出し中にエラーが発生しました: {e}"
-
-    return Response(stream_with_context(generate()), mimetype='text/plain; charset=utf-8')
-
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)), debug=True)
+        const fileInput = document
