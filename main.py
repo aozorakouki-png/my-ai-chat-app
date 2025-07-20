@@ -3,9 +3,6 @@ import datetime
 import json
 import requests
 from flask import Flask, request, render_template_string, redirect, url_for, Response, stream_with_context, session, abort
-from urllib.parse import unquote
-from google.cloud import firestore
-from google_auth_oauthlib.flow import Flow
 
 # --- 1. Initial Setup ---
 app = Flask(__name__)
@@ -147,31 +144,7 @@ HTML_TEMPLATE = """
                 knowledgeFiles = config.knowledgeFiles || [];
                 renderFileList();
             }
-
-            async function saveSettings() {
-                const settings = {
-                    model_name: document.getElementById('model_name').value,
-                    temperature: document.getElementById('temperature').value,
-                    system_instruction: document.getElementById('system_instruction').value,
-                    knowledgeFiles: knowledgeFiles
-                };
-                try {
-                    await fetch('/save_settings', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify(settings)
-                    });
-                } catch (error) { console.error("Failed to save settings:", error); }
-            }
-
-            ['model_name', 'temperature', 'system_instruction'].forEach(id => {
-                const el = document.getElementById(id);
-                el.addEventListener('change', saveSettings);
-                el.addEventListener('input', saveSettings);
-            });
             
-            document.addEventListener('DOMContentLoaded', () => { if(isLoggedIn) loadSettings(); });
-
             fileInput.addEventListener('change', (event) => {
                 const newFiles = Array.from(event.target.files);
                 if (knowledgeFiles.length + newFiles.length > 10) { alert("ファイルは合計10個までです。"); return; }
@@ -181,7 +154,6 @@ HTML_TEMPLATE = """
                         reader.onload = (e) => {
                             knowledgeFiles.push({ name: file.name, content: e.target.result });
                             renderFileList();
-                            saveSettings();
                         };
                         reader.readAsText(file, 'UTF-8');
                     }
@@ -195,7 +167,7 @@ HTML_TEMPLATE = """
                     const fileItem = document.createElement('div'); fileItem.className = 'file-item';
                     const fileNameSpan = document.createElement('span'); fileNameSpan.innerText = file.name;
                     const deleteBtn = document.createElement('button'); deleteBtn.innerText = '×';
-                    deleteBtn.onclick = () => { knowledgeFiles.splice(index, 1); renderFileList(); saveSettings(); };
+                    deleteBtn.onclick = () => { knowledgeFiles.splice(index, 1); renderFileList(); };
                     fileItem.appendChild(fileNameSpan); fileItem.appendChild(deleteBtn); fileListDiv.appendChild(fileItem);
                 });
             }
@@ -250,10 +222,7 @@ HTML_TEMPLATE = """
         });
         document.addEventListener('DOMContentLoaded', () => {
             if (localStorage.getItem('theme') === 'dark') { document.body.classList.add('dark-mode'); }
-            if(isLoggedIn) {
-                // DOMが完全に読み込まれてから設定をロードし、イベントリスナーをアタッチ
-                loadSettings();
-            }
+            if(isLoggedIn) loadSettings();
             chatHistory.scrollTop = chatHistory.scrollHeight;
         });
     </script>
@@ -295,24 +264,26 @@ def home():
     if 'google_id' in session:
         user_data = session
         user_id = session['google_id']
-        settings_doc = db.collection('users').document(user_id).get()
+        settings_doc_ref = db.collection('users').document(user_id)
+        settings_doc = settings_doc_ref.get()
+        
         if settings_doc.exists:
             config = settings_doc.to_dict()
-        
+        else:
+            # Firestoreに設定がない新規ユーザーの場合、デフォルト設定を作成して保存
+            config = {
+                "model_name": "gemini-1.5-flash",
+                "temperature": 1.0,
+                "system_instruction": "あなたは親切で優秀なAIアシスタントです。",
+                "knowledgeFiles": []
+            }
+            settings_doc_ref.set(config)
+
         docs = db.collection('users').document(user_id).collection('conversations').order_by('timestamp').limit(50).stream()
         for doc in docs:
             history.append(doc.to_dict())
             
     return render_template_string(HTML_TEMPLATE, user=user_data, history=history, config=config, flow_available=bool(flow))
-
-# --- API Routes for JavaScript ---
-@app.route('/save_settings', methods=['POST'])
-def save_settings():
-    if 'google_id' not in session: return abort(401)
-    settings = request.get_json()
-    user_id = session['google_id']
-    db.collection('users').document(user_id).set(settings, merge=True)
-    return {"status": "success"}
     
 @app.route('/stream_chat', methods=['POST'])
 def stream_chat():
@@ -323,28 +294,28 @@ def stream_chat():
         try:
             data = request.get_json()
             user_prompt = data.get('prompt', "")
-            knowledge_files = data.get('knowledge_files', [])
             
-            # DBから最新の設定を読み込む（同期のため）
-            settings_doc = db.collection('users').document(user_id).get()
-            config = settings_doc.to_dict() if settings_doc.exists else {}
-
-            model_name = config.get('model_name', 'gemini-1.5-flash')
-            temperature = float(config.get('temperature', 1.0))
-            system_instruction = config.get('system_instruction', "")
+            # ▼▼▼ BUG FIX: チャット送信時に設定をDBに保存する処理をここに集約 ▼▼▼
+            settings_to_save = {
+                'model_name': data.get('model_name', 'gemini-1.5-flash'),
+                'temperature': float(data.get('temperature', 1.0)),
+                'system_instruction': data.get('system_instruction', ""),
+                'knowledgeFiles': data.get('knowledge_files', [])
+            }
+            db.collection('users').document(user_id).set(settings_to_save)
             
             if not (genai and user_prompt):
                 yield "エラー: 設定が不十分か、プロンプトが空です。"
                 return
 
             model = genai.GenerativeModel(
-                model_name=model_name,
-                generation_config=genai.GenerationConfig(temperature=temperature),
-                system_instruction=system_instruction,
+                model_name=settings_to_save['model_name'],
+                generation_config=genai.GenerationConfig(temperature=settings_to_save['temperature']),
+                system_instruction=settings_to_save['system_instruction'],
             )
             final_prompt = user_prompt
-            if knowledge_files:
-                combined_content = "\\n\\n".join([f"--- File: {f['name']} ---\\n{f['content']}" for f in knowledge_files])
+            if settings_to_save['knowledgeFiles']:
+                combined_content = "\\n\\n".join([f"--- File: {f['name']} ---\\n{f['content']}" for f in settings_to_save['knowledgeFiles']])
                 final_prompt = f"以下の知識ファイルを元に回答してください。\\n---知識ファイル---\\n{combined_content}\\n--------------\\nユーザーの質問: {user_prompt}"
             
             chat = model.start_chat(history=[])
