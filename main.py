@@ -2,6 +2,8 @@ import os
 import datetime
 import json
 from flask import Flask, request, render_template_string, make_response, redirect, url_for, Response, stream_with_context
+# ▼▼▼ Cookieの文字化けを修正するためにurllib.parseからunquoteをインポート ▼▼▼
+from urllib.parse import unquote
 
 # Firestore client
 from google.cloud import firestore
@@ -53,7 +55,7 @@ HTML_TEMPLATE = """
         select, input[type=number], input[type=file], .sidebar textarea { width: 100%; padding: 8px; border: 1px solid var(--border-color); border-radius: 5px; box-sizing: border-box; background-color: var(--bg-color); color: var(--text-color);}
         #file-list { font-size: 12px; margin-top: 5px; }
         .file-item { display: flex; justify-content: space-between; align-items: center; margin-bottom: 3px; }
-        .file-item span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .file-item span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-right: 5px;}
         .file-item button { background: #dc3545; color: white; border: none; border-radius: 4px; padding: 1px 6px; font-size: 12px; cursor: pointer; }
         .theme-toggle { position: fixed; top: 10px; right: 10px; cursor: pointer; font-size: 24px; z-index: 100; }
     </style>
@@ -112,14 +114,20 @@ HTML_TEMPLATE = """
             localStorage.setItem('theme', document.body.classList.contains('dark-mode') ? 'dark' : 'light');
         });
         document.addEventListener('DOMContentLoaded', () => {
+            // Restore theme
             if (localStorage.getItem('theme') === 'dark') {
                 document.body.classList.add('dark-mode');
             }
-            // ▼▼▼ BUG FIX: Restore knowledge files from cookie on page load ▼▼▼
+            // Restore settings from cookie
             const savedConfig = getCookie('ai_config');
-            if (savedConfig && savedConfig.knowledgeFiles) {
-                knowledgeFiles = savedConfig.knowledgeFiles;
-                renderFileList();
+            if (savedConfig) {
+                document.getElementById('model_name').value = savedConfig.model_name || 'gemini-1.5-flash';
+                document.getElementById('temperature').value = savedConfig.temperature || 1.0;
+                document.getElementById('system_instruction').value = savedConfig.system_instruction || '';
+                if (savedConfig.knowledgeFiles) {
+                    knowledgeFiles = savedConfig.knowledgeFiles;
+                    renderFileList();
+                }
             }
             chatHistory.scrollTop = chatHistory.scrollHeight;
         });
@@ -137,7 +145,7 @@ HTML_TEMPLATE = """
                     reader.onload = (e) => {
                         knowledgeFiles.push({ name: file.name, content: e.target.result });
                         renderFileList();
-                        saveConfigToCookie(); // Save after file is added
+                        saveConfigToCookie();
                     };
                     reader.readAsText(file, 'UTF-8');
                 }
@@ -157,7 +165,7 @@ HTML_TEMPLATE = """
                 deleteBtn.onclick = () => {
                     knowledgeFiles.splice(index, 1);
                     renderFileList();
-                    saveConfigToCookie(); // Save after file is removed
+                    saveConfigToCookie();
                 };
                 fileItem.appendChild(fileNameSpan);
                 fileItem.appendChild(deleteBtn);
@@ -177,7 +185,6 @@ HTML_TEMPLATE = """
 
             const modelBubble = appendMessage('...', 'model');
             
-            // ▼▼▼ BUG FIX: Use JSON to send data correctly ▼▼▼
             const payload = {
                 prompt: userPrompt,
                 model_name: document.getElementById('model_name').value,
@@ -233,9 +240,9 @@ HTML_TEMPLATE = """
                 model_name: document.getElementById('model_name').value,
                 temperature: document.getElementById('temperature').value,
                 system_instruction: document.getElementById('system_instruction').value,
-                knowledgeFiles: knowledgeFiles // Save files to cookie
+                knowledgeFiles: knowledgeFiles
             };
-            document.cookie = `ai_config=${encodeURIComponent(JSON.stringify(config))}; max-age=31536000; path=/`;
+            document.cookie = `ai_config=${encodeURIComponent(JSON.stringify(config))}; max-age=31536000; path=/; SameSite=Lax`;
         }
 
         function getCookie(name) {
@@ -248,6 +255,7 @@ HTML_TEMPLATE = """
                     return null;
                 }
             }
+            return null;
         }
     </script>
 </body>
@@ -257,15 +265,23 @@ HTML_TEMPLATE = """
 # --- Python Backend ---
 @app.route('/', methods=['GET'])
 def home():
-    saved_config = request.cookies.get('ai_config')
+    # ▼▼▼ BUG FIX: Decode cookie correctly on the server-side ▼▼▼
+    saved_config_encoded = request.cookies.get('ai_config')
     config = {}
-    if saved_config:
-        try: config = json.loads(saved_config)
-        except (json.JSONDecodeError, TypeError): pass
+    if saved_config_encoded:
+        try:
+            # First, URL-decode the string, then parse the JSON
+            saved_config_decoded = unquote(saved_config_encoded)
+            config = json.loads(saved_config_decoded)
+        except (json.JSONDecodeError, TypeError):
+            # If cookie is broken, start with an empty config
+            pass
     
+    # Set default values for any missing keys
     config.setdefault('model_name', 'gemini-1.5-flash')
     config.setdefault('temperature', 1.0)
     config.setdefault('system_instruction', "あなたは親切で優秀なAIアシスタントです。")
+    # knowledgeFiles is handled by JavaScript, so we don't need a server-side default for it
 
     display_history = []
     try:
@@ -277,7 +293,6 @@ def home():
         
     return render_template_string(HTML_TEMPLATE, history=display_history, config=config)
 
-# ▼▼▼ BUG FIX: Receive JSON data instead of form data ▼▼▼
 @app.route('/stream_chat', methods=['POST'])
 def stream_chat():
     def generate():
@@ -305,8 +320,8 @@ def stream_chat():
 
             final_prompt = user_prompt
             if knowledge_files:
-                combined_file_content = "\\n\\n".join([f"--- File: {f['name']} ---\\n{f['content']}" for f in knowledge_files])
-                final_prompt = f"以下の知識ファイルを元に回答してください。\\n---知識ファイル---\\n{combined_file_content}\\n--------------\\nユーザーの質問: {user_prompt}"
+                combined_file_content = "\n\n".join([f"--- File: {f['name']} ---\n{f['content']}" for f in knowledge_files])
+                final_prompt = f"以下の知識ファイルを元に回答してください。\n---知識ファイル---\n{combined_file_content}\n--------------\nユーザーの質問: {user_prompt}"
 
             response_stream = model.generate_content(final_prompt, stream=True)
             
