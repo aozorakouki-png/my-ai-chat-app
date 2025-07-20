@@ -1,3 +1,4 @@
 Flask
 gunicorn
 google-generativeai
+google-cloud-firestore
