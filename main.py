@@ -16,35 +16,64 @@ except ImportError:
 app = Flask(__name__)
 db = firestore.Client()
 
+# --- ▼▼▼ HTML, CSS, JavaScriptを全面的に刷新 ▼▼▼ ---
 HTML_TEMPLATE = """
 <!DOCTYPE html>
-<html>
+<html lang="ja">
 <head>
-    <title>AI Chat (Full-Featured)</title>
+    <title>AI Chat Final</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta charset="UTF-8">
     <style>
-        body { font-family: sans-serif; background-color: #f7f9fc; margin: 0; }
+        /* CSS Variables for theming */
+        :root {
+            --bg-color: #f7f9fc;
+            --text-color: #000;
+            --sidebar-bg: #ffffff;
+            --border-color: #ddd;
+            --user-bubble-bg: #0b93f6;
+            --model-bubble-bg: #e5e5ea;
+            --input-area-bg: #f0f2f5;
+        }
+        body.dark-mode {
+            --bg-color: #121212;
+            --text-color: #e0e0e0;
+            --sidebar-bg: #1e1e1e;
+            --border-color: #444;
+            --user-bubble-bg: #377dff;
+            --model-bubble-bg: #333333;
+            --input-area-bg: #2a2a2a;
+        }
+        /* General Layout */
+        html, body { height: 100%; margin: 0; font-family: sans-serif; background-color: var(--bg-color); color: var(--text-color); transition: background-color 0.3s, color 0.3s; }
         .wrapper { display: flex; height: 100vh; }
-        .sidebar { width: 320px; padding: 20px; border-right: 1px solid #ddd; background-color: #ffffff; display: flex; flex-direction: column; overflow-y: auto;}
+        .sidebar { width: 320px; padding: 20px; border-right: 1px solid var(--border-color); background-color: var(--sidebar-bg); display: flex; flex-direction: column; overflow-y: auto; flex-shrink: 0;}
         .chat-wrapper { flex-grow: 1; display: flex; flex-direction: column; height: 100vh; }
-        .chat-history { flex-grow: 1; overflow-y: auto; padding: 20px; }
-        .message { display: flex; margin-bottom: 20px; max-width: 90%; }
+        .chat-history { flex-grow: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; }
+        /* Chat Bubbles */
+        .message { display: flex; margin-bottom: 20px; max-width: 80%; }
         .message-bubble { padding: 10px 15px; border-radius: 18px; line-height: 1.5; }
         .user-message { align-self: flex-end; }
-        .user-message .message-bubble { background-color: #0b93f6; color: white; }
+        .user-message .message-bubble { background-color: var(--user-bubble-bg); color: white; }
         .model-message { align-self: flex-start; }
-        .model-message .message-bubble { background-color: #e5e5ea; color: black; }
-        .input-area { padding: 15px; border-top: 1px solid #ddd; background-color: #f0f2f5; }
+        .model-message .message-bubble { background-color: var(--model-bubble-bg); color: var(--text-color); }
+        /* Input Area */
+        .input-area { padding: 15px; border-top: 1px solid var(--border-color); background-color: var(--input-area-bg); }
         .input-area form { display: flex; gap: 10px; align-items: center; }
-        .input-area textarea { flex-grow: 1; border: 1px solid #ddd; border-radius: 18px; padding: 10px 15px; resize: none; font-size: 16px; max-height: 120px; }
+        .input-area textarea { flex-grow: 1; border: 1px solid var(--border-color); border-radius: 18px; padding: 10px 15px; resize: none; font-size: 16px; max-height: 120px; background-color: var(--sidebar-bg); color: var(--text-color); }
         .input-area button { background: #0b93f6; color: white; border: none; border-radius: 50%; width: 40px; height: 40px; font-size: 20px; cursor: pointer; flex-shrink: 0; }
+        /* Sidebar Elements */
         label { font-weight: bold; margin-top: 15px; margin-bottom: 5px; display: block; }
-        select, input[type=number], input[type=file], textarea { width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 5px; box-sizing: border-box; }
-        .file-info { display: flex; align-items: center; justify-content: space-between; font-size: 12px; color: green; margin-top: 5px; }
-        .clear-file-btn { background: #6c757d; color: white; border-radius: 4px; padding: 2px 8px; font-size: 12px; cursor: pointer; text-decoration: none; }
+        select, input[type=number], input[type=file], .sidebar textarea { width: 100%; padding: 8px; border: 1px solid var(--border-color); border-radius: 5px; box-sizing: border-box; background-color: var(--bg-color); color: var(--text-color);}
+        #file-list { font-size: 12px; margin-top: 5px; }
+        .file-item { display: flex; justify-content: space-between; align-items: center; margin-bottom: 3px; }
+        .file-item span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .file-item button { background: #dc3545; color: white; border: none; border-radius: 4px; padding: 1px 6px; font-size: 12px; cursor: pointer; }
+        .theme-toggle { position: absolute; top: 10px; right: 10px; cursor: pointer; font-size: 24px; }
     </style>
 </head>
 <body>
+    <div class="theme-toggle" id="theme-toggle">🌓</div>
     <div class="wrapper">
         <div class="sidebar">
             <h2>設定</h2>
@@ -55,21 +84,13 @@ HTML_TEMPLATE = """
                     <option value="gemini-1.5-pro" {% if config.model_name == 'gemini-1.5-pro' %}selected{% endif %}>Gemini 1.5 Pro</option>
                     <option value="gemini-1.0-pro" {% if config.model_name == 'gemini-1.0-pro' %}selected{% endif %}>Gemini 1.0 Pro</option>
                 </select>
-
                 <label for="temperature">Temperature:</label>
                 <input type="number" id="temperature" name="temperature" min="0" max="2" step="0.1" value="{{ config.temperature }}">
-
                 <label for="system_instruction">System Instruction:</label>
                 <textarea id="system_instruction" name="system_instruction" rows="6">{{ config.system_instruction }}</textarea>
-                
-                <label for="knowledge_file">知識ファイル (TXT):</label>
-                <input type="file" id="knowledge_file" name="knowledge_file" accept=".txt">
-                {% if file_name %}
-                <div class="file-info">
-                    <span>{{ file_name }}</span>
-                    <a href="{{ url_for('clear_file') }}" class="clear-file-btn">クリア</a>
-                </div>
-                {% endif %}
+                <label for="knowledge_file">知識ファイル (最大10件):</label>
+                <input type="file" id="knowledge_file" name="knowledge_file" accept=".txt" multiple>
+                <div id="file-list"></div>
             </form>
         </div>
         <div class="chat-wrapper">
@@ -90,27 +111,73 @@ HTML_TEMPLATE = """
     </div>
     
     <script>
+        // --- State Management ---
         const chatForm = document.getElementById('chat-form');
         const configForm = document.getElementById('config-form');
         const promptInput = chatForm.querySelector('textarea[name="prompt"]');
         const chatHistory = document.getElementById('chat-history');
-        let uploadedFileContent = "";
-        let uploadedFileName = "";
+        const fileInput = document.getElementById('knowledge_file');
+        const fileListDiv = document.getElementById('file-list');
+        const themeToggle = document.getElementById('theme-toggle');
+        let knowledgeFiles = []; // {name: "...", content: "..."}
 
-        configForm.querySelector('#knowledge_file').addEventListener('change', function(event) {
-            const file = event.target.files[0];
-            if (file) {
-                const reader = new FileReader();
-                reader.onload = function(e) {
-                    uploadedFileContent = e.target.result;
-                    uploadedFileName = file.name;
-                    saveConfigToCookie(); 
-                    document.querySelector('.file-info span').innerText = uploadedFileName;
-                };
-                reader.readAsText(file);
+        // --- Theme Toggle ---
+        themeToggle.addEventListener('click', () => {
+            document.body.classList.toggle('dark-mode');
+            localStorage.setItem('theme', document.body.classList.contains('dark-mode') ? 'dark' : 'light');
+        });
+        document.addEventListener('DOMContentLoaded', () => {
+            if (localStorage.getItem('theme') === 'dark') {
+                document.body.classList.add('dark-mode');
             }
+            chatHistory.scrollTop = chatHistory.scrollHeight;
         });
 
+        // --- File Management ---
+        fileInput.addEventListener('change', (event) => {
+            if (event.target.files.length > 10) {
+                alert("ファイルは最大10個までです。");
+                event.target.value = ''; // Clear selection
+                return;
+            }
+            knowledgeFiles = []; // Reset file list
+            const files = Array.from(event.target.files);
+            let filesRead = 0;
+            if (files.length === 0) {
+                renderFileList();
+                return;
+            }
+            files.forEach(file => {
+                const reader = new FileReader();
+                reader.onload = (e) => {
+                    knowledgeFiles.push({ name: file.name, content: e.target.result });
+                    filesRead++;
+                    if (filesRead === files.length) renderFileList();
+                };
+                reader.readAsText(file, 'UTF-8');
+            });
+        });
+
+        function renderFileList() {
+            fileListDiv.innerHTML = '';
+            knowledgeFiles.forEach((file, index) => {
+                const fileItem = document.createElement('div');
+                fileItem.className = 'file-item';
+                const fileNameSpan = document.createElement('span');
+                fileNameSpan.innerText = file.name;
+                const deleteBtn = document.createElement('button');
+                deleteBtn.innerText = '×';
+                deleteBtn.onclick = () => {
+                    knowledgeFiles.splice(index, 1);
+                    renderFileList();
+                };
+                fileItem.appendChild(fileNameSpan);
+                fileItem.appendChild(deleteBtn);
+                fileListDiv.appendChild(fileItem);
+            });
+        }
+        
+        // --- Chat Submission ---
         chatForm.addEventListener('submit', async function(event) {
             event.preventDefault();
             const userPrompt = promptInput.value.trim();
@@ -120,23 +187,23 @@ HTML_TEMPLATE = """
             promptInput.value = '';
             promptInput.style.height = 'auto';
 
-            const modelBubble = appendMessage('', 'model');
+            const modelBubble = appendMessage('...', 'model');
             
             const formData = new FormData(configForm);
             formData.append('prompt', userPrompt);
-            formData.append('file_content', uploadedFileContent);
+            const combinedFileContent = knowledgeFiles.map(f => `--- File: ${f.name} ---\n${f.content}`).join('\n\n');
+            formData.append('file_content', combinedFileContent);
             
             saveConfigToCookie();
             
             try {
-                const response = await fetch('/stream_chat', {
-                    method: 'POST',
-                    body: formData
-                });
+                const response = await fetch('/stream_chat', { method: 'POST', body: formData });
+                if (!response.ok) throw new Error(`Server error: ${response.status}`);
 
                 const reader = response.body.getReader();
                 const decoder = new TextDecoder();
                 let fullResponse = "";
+                modelBubble.querySelector('p').innerText = ""; // Clear "..."
                 while (true) {
                     const { value, done } = await reader.read();
                     if (done) break;
@@ -145,8 +212,7 @@ HTML_TEMPLATE = """
                     modelBubble.querySelector('p').innerText = fullResponse;
                     chatHistory.scrollTop = chatHistory.scrollHeight;
                 }
-                 // チャット完了後、3秒待ってからリロードして履歴をDBから再読み込み
-                setTimeout(() => window.location.reload(), 3000);
+                 setTimeout(() => window.location.reload(), 2000); // Reload to show new log in history
             } catch (error) {
                 modelBubble.querySelector('p').innerText = "エラーが発生しました: " + error;
             }
@@ -155,14 +221,11 @@ HTML_TEMPLATE = """
         function appendMessage(text, role) {
             const messageDiv = document.createElement('div');
             messageDiv.className = `message ${role}-message`;
-            
             const bubbleDiv = document.createElement('div');
             bubbleDiv.className = 'message-bubble';
-            
             const p = document.createElement('p');
             p.style.whiteSpace = 'pre-wrap';
             p.innerText = text;
-            
             bubbleDiv.appendChild(p);
             messageDiv.appendChild(bubbleDiv);
             chatHistory.appendChild(messageDiv);
@@ -175,7 +238,6 @@ HTML_TEMPLATE = """
                 model_name: document.getElementById('model_name').value,
                 temperature: document.getElementById('temperature').value,
                 system_instruction: document.getElementById('system_instruction').value,
-                file_name: uploadedFileName
             };
             document.cookie = `ai_config=${JSON.stringify(config)}; max-age=31536000; path=/`;
         }
@@ -184,30 +246,7 @@ HTML_TEMPLATE = """
 </html>
 """
 
-# --- ▼▼▼ ここに削除したルートを復活させます ▼▼▼ ---
-@app.route('/clear_file')
-def clear_file():
-    resp = make_response(redirect(url_for('home')))
-    saved_config = request.cookies.get('ai_config')
-    if saved_config:
-        try:
-            config = json.loads(saved_config)
-            config['file_name'] = ""
-            resp.set_cookie('ai_config', json.dumps(config), max_age=365*24*60*60)
-        except (json.JSONDecodeError, TypeError):
-            resp.delete_cookie('ai_config')
-    return resp
-
-# (ログ削除機能は一旦コメントアウト。必要に応じて復活させてください)
-# @app.route('/delete/<log_id>')
-# def delete_log(log_id):
-#     try:
-#         db.collection('conversations').document(log_id).delete()
-#     except Exception as e:
-#         print(f"Error deleting log: {e}")
-#     return redirect(url_for('home'))
-
-# --- メインページ表示用のルート ---
+# --- Python Backend ---
 @app.route('/', methods=['GET'])
 def home():
     saved_config = request.cookies.get('ai_config')
@@ -219,7 +258,6 @@ def home():
     config.setdefault('model_name', 'gemini-1.5-flash')
     config.setdefault('temperature', 1.0)
     config.setdefault('system_instruction', "あなたは親切で優秀なAIアシスタントです。")
-    config.setdefault('file_name', "")
 
     display_history = []
     try:
@@ -229,25 +267,25 @@ def home():
     except Exception as e:
         print(f"Error fetching history: {e}")
         
-    return render_template_string(HTML_TEMPLATE, history=display_history, config=config, file_name=config.get('file_name'))
+    return render_template_string(HTML_TEMPLATE, history=display_history, config=config)
 
-# --- AIとの対話（ストリーミング）専門のルート ---
 @app.route('/stream_chat', methods=['POST'])
 def stream_chat():
     def generate():
-        user_prompt = request.form.get('prompt', "")
-        model_name = request.form.get('model_name', 'gemini-1.5-flash')
-        system_instruction = request.form.get('system_instruction', "")
-        temperature = float(request.form.get('temperature', 1.0))
-        file_content = request.form.get('file_content', '')
-        
-        api_key = os.environ.get('GEMINI_API_KEY')
-        if not (api_key and genai and user_prompt):
-            yield "エラー: サーバー設定が不十分か、プロンプトが空です。"
-            return
-
-        full_ai_response = ""
         try:
+            user_prompt = request.form.get('prompt', "")
+            model_name = request.form.get('model_name', 'gemini-1.5-flash')
+            system_instruction = request.form.get('system_instruction', "")
+            temperature = float(request.form.get('temperature', 1.0))
+            file_content = request.form.get('file_content', '')
+            
+            api_key = os.environ.get('GEMINI_API_KEY')
+            if not (api_key and genai and user_prompt):
+                yield "エラー: サーバー設定が不十分か、プロンプトが空です。"
+                return
+
+            full_ai_response = ""
+            
             genai.configure(api_key=api_key)
             model = genai.GenerativeModel(
                 model_name=model_name,
@@ -269,12 +307,12 @@ def stream_chat():
             utc_now = datetime.datetime.now(datetime.timezone.utc)
             db.collection('conversations').add({'role': 'user', 'text': user_prompt, 'timestamp': utc_now})
             db.collection('conversations').add({'role': 'model', 'text': full_ai_response, 'timestamp': utc_now + datetime.timedelta(microseconds=1)})
+
         except Exception as e:
             print(f"Error during generation: {e}")
             yield f"API呼び出し中にエラーが発生しました: {e}"
 
-    return Response(stream_with_context(generate()), mimetype='text/plain')
-
+    return Response(stream_with_context(generate()), mimetype='text/plain; charset=utf-8')
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)), debug=True)
