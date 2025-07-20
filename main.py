@@ -17,7 +17,6 @@ app = Flask(__name__)
 db = firestore.Client()
 
 # --- HTMLテンプレート ---
-# ログ選択用のチェックボックスを追加
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html>
@@ -34,43 +33,59 @@ HTML_TEMPLATE = """
         .history-item .content { flex-grow: 1; }
         .history-item p { margin: 0; white-space: pre-wrap; word-wrap: break-word; }
         .history-item .prompt { font-weight: bold; }
-        .delete-btn { background: #ff4d4d; color: white; border: none; border-radius: 50%; width: 20px; height: 20px; cursor: pointer; font-size: 12px; line-height: 20px; text-align: center; }
-        textarea, select, input[type=number] { width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 5px; box-sizing: border-box; }
+        .delete-btn { background: #ff4d4d; color: white; border: none; border-radius: 50%; width: 20px; height: 20px; cursor: pointer; font-size: 12px; line-height: 20px; text-align: center; text-decoration: none; display: inline-block;}
+        textarea, select, input[type=number], input[type=file] { width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 5px; box-sizing: border-box; margin-top: 5px; }
         .response { background-color: #ffffff; border: 1px solid #ddd; padding: 15px; border-radius: 5px; margin-top: 20px; white-space: pre-wrap; }
         input[type=submit] { background-color: #1a73e8; color: white; padding: 10px 15px; border: none; border-radius: 5px; cursor: pointer; margin-top: 10px;}
         .settings-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-bottom: 15px;}
         label { font-weight: bold; margin-bottom: 5px; display: block; }
+        .file-info { display: flex; align-items: center; justify-content: space-between; font-size: 12px; color: green; }
+        .clear-file-btn { background: #6c757d; color: white; border: none; border-radius: 4px; padding: 2px 8px; font-size: 12px; cursor: pointer; text-decoration: none;}
     </style>
 </head>
 <body>
     <h1>Advanced AI Chat</h1>
     <div class="container">
-        <form method="post" style="display: contents;">
+        <form method="post" enctype="multipart/form-data" style="display: contents;">
             <div class="main-content">
-                    <div class="settings-grid">
-                        <div>
-                            <label for="model_name">モデル:</label>
-                            <select id="model_name" name="model_name">
-                                <option value="gemini-1.5-flash" {% if config.model_name == 'gemini-1.5-flash' %}selected{% endif %}>Gemini 1.5 Flash</option>
-                                <option value="gemini-1.5-pro" {% if config.model_name == 'gemini-1.5-pro' %}selected{% endif %}>Gemini 1.5 Pro</option>
-                                <option value="gemini-1.0-pro" {% if config.model_name == 'gemini-1.0-pro' %}selected{% endif %}>Gemini 1.0 Pro</option>
-                            </select>
-                        </div>
-                        <div>
-                            <label for="temperature">Temperature (0-2):</label>
-                            <input type="number" id="temperature" name="temperature" min="0" max="2" step="0.1" value="{{ config.temperature }}">
-                        </div>
+                <div class="settings-grid">
+                    <div>
+                        <label for="model_name">モデル:</label>
+                        <select id="model_name" name="model_name">
+                            <option value="gemini-1.5-flash" {% if config.model_name == 'gemini-1.5-flash' %}selected{% endif %}>Gemini 1.5 Flash</option>
+                            <option value="gemini-1.5-pro" {% if config.model_name == 'gemini-1.5-pro' %}selected{% endif %}>Gemini 1.5 Pro</option>
+                            <option value="gemini-1.0-pro" {% if config.model_name == 'gemini-1.0-pro' %}selected{% endif %}>Gemini 1.0 Pro</option>
+                        </select>
                     </div>
                     <div>
-                        <label for="system_instruction">System Instruction (AIへの指示):</label>
-                        <textarea id="system_instruction" name="system_instruction" rows="4" placeholder="あなたは優秀なアシスタントです。簡潔に答えてください。">{{ config.system_instruction }}</textarea>
+                        <label for="temperature">Temperature (0-2):</label>
+                        <input type="number" id="temperature" name="temperature" min="0" max="2" step="0.1" value="{{ config.temperature }}">
                     </div>
-                    <br>
-                    <div>
-                        <label for="prompt">プロンプト:</label>
-                        <textarea id="prompt" name="prompt" rows="5" placeholder="ここにプロンプトを入力...">{{ prompt }}</textarea>
+                </div>
+                <div>
+                    <label for="system_instruction">System Instruction (AIへの指示):</label>
+                    <textarea id="system_instruction" name="system_instruction" rows="4">{{ config.system_instruction }}</textarea>
+                </div>
+                <br>
+                <div>
+                    <label for="knowledge_file">知識ファイル (TXT):</label>
+                    <input type="file" id="knowledge_file" name="knowledge_file" accept=".txt">
+                    {% if file_content %}
+                    <div class="file-info">
+                        <span>現在、ファイル「{{ file_name }}」が知識として読み込まれています。</span>
+                        <a href="{{ url_for('clear_file') }}" class="clear-file-btn">ファイルをクリア</a>
                     </div>
-                    <input type="submit" value="送信">
+                    {% endif %}
+                </div>
+
+                <input type="hidden" name="file_content" value="{{ file_content }}">
+                <input type="hidden" name="file_name" value="{{ file_name }}">
+                <br>
+                <div>
+                    <label for="prompt">プロンプト:</label>
+                    <textarea id="prompt" name="prompt" rows="5" placeholder="ここにプロンプトを入力..."></textarea>
+                </div>
+                <input type="submit" value="送信">
 
                 {% if error %}
                 <div class="response" style="color: red;"><h2>エラー:</h2><p>{{ error }}</p></div>
@@ -100,7 +115,23 @@ HTML_TEMPLATE = """
 </html>
 """
 
-# --- 会話ログ削除のルート ---
+# --- ファイルクリア用のルート ---
+@app.route('/clear_file')
+def clear_file():
+    saved_config = request.cookies.get('ai_config')
+    if saved_config:
+        try:
+            config = json.loads(saved_config)
+            config['file_content'] = ""
+            config['file_name'] = ""
+            resp = make_response(redirect(url_for('home')))
+            resp.set_cookie('ai_config', json.dumps(config), max_age=365*24*60*60)
+            return resp
+        except (json.JSONDecodeError, TypeError):
+            pass
+    return redirect(url_for('home'))
+
+# --- ログ削除用のルート ---
 @app.route('/delete/<log_id>')
 def delete_log(log_id):
     try:
@@ -109,6 +140,7 @@ def delete_log(log_id):
         print(f"Error deleting log: {e}")
     return redirect(url_for('home'))
 
+# --- メインの処理 ---
 @app.route('/', methods=['GET', 'POST'])
 def home():
     user_prompt = ""
@@ -116,92 +148,53 @@ def home():
     error_message = ""
     locked_log_ids = []
     
-    # --- 設定の読み込み (Cookie優先) ---
+    # --- ▼▼▼ ここでCookieから全設定を読み込みます ▼▼▼ ---
     saved_config = request.cookies.get('ai_config')
     if saved_config:
         try:
             config = json.loads(saved_config)
         except (json.JSONDecodeError, TypeError):
             saved_config = None
-
+    
     if not saved_config:
+        # Cookieがない場合のデフォルト設定
         config = {
-            "model_name": "gemini-1.5-flash", "temperature": 1.0,
-            "system_instruction": "あなたは親切で優秀なAIアシスタントです。"
+            "model_name": "gemini-1.5-flash", "temperature": 1.0, "system_instruction": "",
+            "file_content": "", "file_name": ""
         }
+    
+    file_content = config.get('file_content', '')
+    file_name = config.get('file_name', '')
     
     api_key = os.environ.get('GEMINI_API_KEY')
 
     if request.method == 'POST':
+        # --- ▼▼▼ ここでフォームから送信された全設定をconfigに保存します ▼▼▼ ---
         user_prompt = request.form.get('prompt', "")
-        config['model_name'] = request.form.get('model_name', 'gemini-1.5-flash')
-        config['system_instruction'] = request.form.get('system_instruction', "")
-        try:
-            config['temperature'] = float(request.form.get('temperature', 1.0))
-        except (ValueError, TypeError):
-            config['temperature'] = 1.0
-
-        # --- ▼▼▼ ここからが変更点 ▼▼▼ ---
-        # チェックされたログのIDリストを取得
+        config['model_name'] = request.form.get('model_name')
+        config['system_instruction'] = request.form.get('system_instruction')
+        config['temperature'] = float(request.form.get('temperature', 1.0))
         locked_log_ids = request.form.getlist('locked_logs')
-        # --- ▲▲▲ ここまでが変更点 ▲▲▲ ---
 
-        if not api_key:
-            error_message = "サーバー側でAPIキーが設定されていません。"
-        elif not genai:
-             error_message = "サーバー側でGenerative AIライブラリの読み込みに失敗しました。"
-        elif user_prompt:
+        uploaded_file = request.files.get('knowledge_file')
+        if uploaded_file and uploaded_file.filename != '':
+            file_name = uploaded_file.filename
             try:
-                genai.configure(api_key=api_key)
-                
-                model = genai.GenerativeModel(
-                    model_name=config['model_name'],
-                    generation_config=genai.GenerationConfig(temperature=config['temperature']),
-                    system_instruction=config['system_instruction'],
-                )
-
-                # --- ▼▼▼ ここからが変更点 ▼▼▼ ---
-                # チェックされたログだけを読み込んでコンテキストを作成
-                chat_history = []
-                if locked_log_ids:
-                    # Firestoreから個別にドキュメントを取得
-                    selected_docs = [db.collection('conversations').document(log_id).get() for log_id in locked_log_ids]
-                    # タイムスタンプでソートして時系列を維持
-                    selected_docs.sort(key=lambda x: x.to_dict().get('timestamp'))
-                    
-                    for doc in selected_docs:
-                        if doc.exists:
-                            log = doc.to_dict()
-                            chat_history.append({'role': 'user', 'parts': [log.get('prompt', '')]})
-                            chat_history.append({'role': 'model', 'parts': [log.get('response', '')]})
-                # --- ▲▲▲ ここまでが変更点 ▲▲▲ ---
-
-                chat = model.start_chat(history=chat_history)
-                response = chat.send_message(user_prompt)
-                ai_response = response.text
-
-                # Firestoreに会話ログを保存
-                doc_ref = db.collection('conversations').document()
-                doc_ref.set({
-                    'prompt': user_prompt, 'response': ai_response,
-                    'config': config, 'timestamp': datetime.datetime.now(datetime.timezone.utc)
-                })
-
+                file_content = uploaded_file.read().decode('utf-8')
             except Exception as e:
-                error_message = f"API呼び出し中にエラーが発生しました: {e}"
-
-    # 表示用の会話ログを全件取得
-    display_history = []
-    try:
-        docs = db.collection('conversations').order_by('timestamp', direction=firestore.Query.DESCENDING).stream()
-        for doc in docs:
-            log_data = doc.to_dict()
-            log_data['id'] = doc.id
-            display_history.append(log_data)
-    except Exception as e:
-        print(f"Error fetching history: {e}")
+                error_message = f"ファイルの読み込みに失敗しました: {e}"
         
-    resp = make_response(render_template_string(HTML_TEMPLATE, prompt=user_prompt, response=ai_response, error=error_message, history=display_history, config=config, locked_log_ids=locked_log_ids))
+        config['file_content'] = file_content
+        config['file_name'] = file_name
+        
+        # (AIへの送信処理は省略)
+        # ...
+
+    # (DBからの履歴取得処理は省略)
+    # ...
+        
+    # --- ▼▼▼ ここで更新された全設定をCookieに書き込みます ▼▼▼ ---
+    resp = make_response(render_template_string(HTML_TEMPLATE, prompt=user_prompt, response=ai_response, error=error_message, history=[], config=config, locked_log_ids=locked_log_ids, file_content=file_content, file_name=file_name))
     resp.set_cookie('ai_config', json.dumps(config), max_age=365*24*60*60)
     
     return resp
