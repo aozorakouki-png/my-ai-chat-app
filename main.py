@@ -63,7 +63,7 @@ HTML_TEMPLATE = """
     <div class="wrapper">
         <div class="sidebar">
             <h2>設定</h2>
-            <form id="config-form" accept-charset="UTF-8">
+            <div id="config-form">
                 <label for="model_name">モデル:</label>
                 <select id="model_name" name="model_name">
                     <option value="gemini-1.5-flash" {% if config.model_name == 'gemini-1.5-flash' %}selected{% endif %}>Gemini 1.5 Flash</option>
@@ -77,7 +77,7 @@ HTML_TEMPLATE = """
                 <label for="knowledge_file">知識ファイル (最大10件):</label>
                 <input type="file" id="knowledge_file" name="knowledge_file" accept=".txt" multiple>
                 <div id="file-list"></div>
-            </form>
+            </div>
         </div>
         <div class="chat-wrapper">
             <div class="chat-history" id="chat-history">
@@ -88,7 +88,7 @@ HTML_TEMPLATE = """
                 {% endfor %}
             </div>
             <div class="input-area">
-                <form id="chat-form" accept-charset="UTF-8">
+                <form id="chat-form">
                     <textarea name="prompt" placeholder="メッセージを入力..." required></textarea>
                     <button type="submit">↑</button>
                 </form>
@@ -97,9 +97,8 @@ HTML_TEMPLATE = """
     </div>
     
     <script>
-        // --- State Management ---
+        // --- State Management & Initialization ---
         const chatForm = document.getElementById('chat-form');
-        const configForm = document.getElementById('config-form');
         const promptInput = chatForm.querySelector('textarea[name="prompt"]');
         const chatHistory = document.getElementById('chat-history');
         const fileInput = document.getElementById('knowledge_file');
@@ -107,7 +106,7 @@ HTML_TEMPLATE = """
         const themeToggle = document.getElementById('theme-toggle');
         let knowledgeFiles = [];
 
-        // --- Theme Toggle ---
+        // --- Theme Management ---
         themeToggle.addEventListener('click', () => {
             document.body.classList.toggle('dark-mode');
             localStorage.setItem('theme', document.body.classList.contains('dark-mode') ? 'dark' : 'light');
@@ -115,6 +114,12 @@ HTML_TEMPLATE = """
         document.addEventListener('DOMContentLoaded', () => {
             if (localStorage.getItem('theme') === 'dark') {
                 document.body.classList.add('dark-mode');
+            }
+            // ▼▼▼ BUG FIX: Restore knowledge files from cookie on page load ▼▼▼
+            const savedConfig = getCookie('ai_config');
+            if (savedConfig && savedConfig.knowledgeFiles) {
+                knowledgeFiles = savedConfig.knowledgeFiles;
+                renderFileList();
             }
             chatHistory.scrollTop = chatHistory.scrollHeight;
         });
@@ -126,13 +131,13 @@ HTML_TEMPLATE = """
                 alert("ファイルは合計10個までです。");
                 return;
             }
-            
             newFiles.forEach(file => {
-                if (!knowledgeFiles.some(existingFile => existingFile.name === file.name)) {
+                if (!knowledgeFiles.some(f => f.name === file.name)) {
                     const reader = new FileReader();
                     reader.onload = (e) => {
                         knowledgeFiles.push({ name: file.name, content: e.target.result });
                         renderFileList();
+                        saveConfigToCookie(); // Save after file is added
                     };
                     reader.readAsText(file, 'UTF-8');
                 }
@@ -152,6 +157,7 @@ HTML_TEMPLATE = """
                 deleteBtn.onclick = () => {
                     knowledgeFiles.splice(index, 1);
                     renderFileList();
+                    saveConfigToCookie(); // Save after file is removed
                 };
                 fileItem.appendChild(fileNameSpan);
                 fileItem.appendChild(deleteBtn);
@@ -171,15 +177,23 @@ HTML_TEMPLATE = """
 
             const modelBubble = appendMessage('...', 'model');
             
-            const formData = new FormData(configForm);
-            formData.append('prompt', userPrompt);
-            const combinedFileContent = knowledgeFiles.map(f => `--- File: ${f.name} ---\\n${f.content}`).join('\\n\\n');
-            formData.append('file_content', combinedFileContent);
+            // ▼▼▼ BUG FIX: Use JSON to send data correctly ▼▼▼
+            const payload = {
+                prompt: userPrompt,
+                model_name: document.getElementById('model_name').value,
+                temperature: document.getElementById('temperature').value,
+                system_instruction: document.getElementById('system_instruction').value,
+                knowledge_files: knowledgeFiles
+            };
             
             saveConfigToCookie();
             
             try {
-                const response = await fetch('/stream_chat', { method: 'POST', body: formData });
+                const response = await fetch('/stream_chat', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
                 if (!response.ok) throw new Error(`Server error: ${response.status} ${await response.text()}`);
 
                 const reader = response.body.getReader();
@@ -194,8 +208,6 @@ HTML_TEMPLATE = """
                     modelBubble.querySelector('p').innerText = fullResponse;
                     chatHistory.scrollTop = chatHistory.scrollHeight;
                 }
-                 // 完了後にリロードしてDBから永続化された履歴を再表示
-                 setTimeout(() => window.location.reload(), 1500);
             } catch (error) {
                 modelBubble.querySelector('p').innerText = "エラーが発生しました: " + error;
             }
@@ -215,20 +227,34 @@ HTML_TEMPLATE = """
             return bubbleDiv;
         }
         
+        // --- Cookie Management ---
         function saveConfigToCookie() {
             const config = {
                 model_name: document.getElementById('model_name').value,
                 temperature: document.getElementById('temperature').value,
                 system_instruction: document.getElementById('system_instruction').value,
+                knowledgeFiles: knowledgeFiles // Save files to cookie
             };
-            document.cookie = `ai_config=${JSON.stringify(config)}; max-age=31536000; path=/`;
+            document.cookie = `ai_config=${encodeURIComponent(JSON.stringify(config))}; max-age=31536000; path=/`;
+        }
+
+        function getCookie(name) {
+            const value = `; ${document.cookie}`;
+            const parts = value.split(`; ${name}=`);
+            if (parts.length === 2) {
+                try {
+                    return JSON.parse(decodeURIComponent(parts.pop().split(';').shift()));
+                } catch (e) {
+                    return null;
+                }
+            }
         }
     </script>
 </body>
 </html>
 """
 
-# --- Python Backend (変更なし) ---
+# --- Python Backend ---
 @app.route('/', methods=['GET'])
 def home():
     saved_config = request.cookies.get('ai_config')
@@ -251,15 +277,17 @@ def home():
         
     return render_template_string(HTML_TEMPLATE, history=display_history, config=config)
 
+# ▼▼▼ BUG FIX: Receive JSON data instead of form data ▼▼▼
 @app.route('/stream_chat', methods=['POST'])
 def stream_chat():
     def generate():
         try:
-            user_prompt = request.form.get('prompt', "")
-            model_name = request.form.get('model_name', 'gemini-1.5-flash')
-            system_instruction = request.form.get('system_instruction', "")
-            temperature = float(request.form.get('temperature', 1.0))
-            file_content = request.form.get('file_content', '')
+            data = request.get_json()
+            user_prompt = data.get('prompt', "")
+            model_name = data.get('model_name', 'gemini-1.5-flash')
+            system_instruction = data.get('system_instruction', "")
+            temperature = float(data.get('temperature', 1.0))
+            knowledge_files = data.get('knowledge_files', [])
             
             api_key = os.environ.get('GEMINI_API_KEY')
             if not (api_key and genai and user_prompt):
@@ -276,8 +304,9 @@ def stream_chat():
             )
 
             final_prompt = user_prompt
-            if file_content:
-                final_prompt = f"以下の知識ファイルを元に回答してください。\\n---知識ファイル---\\n{file_content}\\n--------------\\nユーザーの質問: {user_prompt}"
+            if knowledge_files:
+                combined_file_content = "\\n\\n".join([f"--- File: {f['name']} ---\\n{f['content']}" for f in knowledge_files])
+                final_prompt = f"以下の知識ファイルを元に回答してください。\\n---知識ファイル---\\n{combined_file_content}\\n--------------\\nユーザーの質問: {user_prompt}"
 
             response_stream = model.generate_content(final_prompt, stream=True)
             
