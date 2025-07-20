@@ -23,13 +23,13 @@ HTML_TEMPLATE = """
     <title>AI Chat (Full-Featured)</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
-        html, body { height: 100%; margin: 0; font-family: sans-serif; background-color: #f7f9fc; }
-        .wrapper { display: flex; height: 100%; }
-        .sidebar { width: 300px; padding: 15px; border-right: 1px solid #ddd; background-color: #ffffff; display: flex; flex-direction: column; }
-        .chat-wrapper { flex-grow: 1; display: flex; flex-direction: column; height: 100%; }
+        body { font-family: sans-serif; background-color: #f7f9fc; margin: 0; }
+        .wrapper { display: flex; height: 100vh; }
+        .sidebar { width: 320px; padding: 20px; border-right: 1px solid #ddd; background-color: #ffffff; display: flex; flex-direction: column; overflow-y: auto;}
+        .chat-wrapper { flex-grow: 1; display: flex; flex-direction: column; height: 100vh; }
         .chat-history { flex-grow: 1; overflow-y: auto; padding: 20px; }
-        .message { display: flex; margin-bottom: 15px; max-width: 90%; }
-        .message-bubble { padding: 10px 15px; border-radius: 18px; }
+        .message { display: flex; margin-bottom: 20px; max-width: 90%; }
+        .message-bubble { padding: 10px 15px; border-radius: 18px; line-height: 1.5; }
         .user-message { align-self: flex-end; }
         .user-message .message-bubble { background-color: #0b93f6; color: white; }
         .model-message { align-self: flex-start; }
@@ -38,7 +38,7 @@ HTML_TEMPLATE = """
         .input-area form { display: flex; gap: 10px; align-items: center; }
         .input-area textarea { flex-grow: 1; border: 1px solid #ddd; border-radius: 18px; padding: 10px 15px; resize: none; font-size: 16px; max-height: 120px; }
         .input-area button { background: #0b93f6; color: white; border: none; border-radius: 50%; width: 40px; height: 40px; font-size: 20px; cursor: pointer; flex-shrink: 0; }
-        label { font-weight: bold; margin-top: 10px; margin-bottom: 5px; display: block; }
+        label { font-weight: bold; margin-top: 15px; margin-bottom: 5px; display: block; }
         select, input[type=number], input[type=file], textarea { width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 5px; box-sizing: border-box; }
         .file-info { display: flex; align-items: center; justify-content: space-between; font-size: 12px; color: green; margin-top: 5px; }
         .clear-file-btn { background: #6c757d; color: white; border-radius: 4px; padding: 2px 8px; font-size: 12px; cursor: pointer; text-decoration: none; }
@@ -97,7 +97,6 @@ HTML_TEMPLATE = """
         let uploadedFileContent = "";
         let uploadedFileName = "";
 
-        // ファイルアップロード時の処理
         configForm.querySelector('#knowledge_file').addEventListener('change', function(event) {
             const file = event.target.files[0];
             if (file) {
@@ -105,6 +104,8 @@ HTML_TEMPLATE = """
                 reader.onload = function(e) {
                     uploadedFileContent = e.target.result;
                     uploadedFileName = file.name;
+                    saveConfigToCookie(); 
+                    document.querySelector('.file-info span').innerText = uploadedFileName;
                 };
                 reader.readAsText(file);
             }
@@ -115,21 +116,16 @@ HTML_TEMPLATE = """
             const userPrompt = promptInput.value.trim();
             if (!userPrompt) return;
 
-            // ユーザーのメッセージを画面に追加
             appendMessage(userPrompt, 'user');
             promptInput.value = '';
             promptInput.style.height = 'auto';
 
-            // AIの応答用に空のバブルを追加
             const modelBubble = appendMessage('', 'model');
             
-            // フォームデータを準備
             const formData = new FormData(configForm);
             formData.append('prompt', userPrompt);
             formData.append('file_content', uploadedFileContent);
-            formData.append('file_name', uploadedFileName);
             
-            // 設定をCookieに保存
             saveConfigToCookie();
             
             try {
@@ -140,18 +136,20 @@ HTML_TEMPLATE = """
 
                 const reader = response.body.getReader();
                 const decoder = new TextDecoder();
+                let fullResponse = "";
                 while (true) {
                     const { value, done } = await reader.read();
                     if (done) break;
-                    const chunk = decoder.decode(value);
-                    modelBubble.querySelector('p').innerText += chunk;
+                    const chunk = decoder.decode(value, {stream: true});
+                    fullResponse += chunk;
+                    modelBubble.querySelector('p').innerText = fullResponse;
                     chatHistory.scrollTop = chatHistory.scrollHeight;
                 }
+                 // チャット完了後、3秒待ってからリロードして履歴をDBから再読み込み
+                setTimeout(() => window.location.reload(), 3000);
             } catch (error) {
                 modelBubble.querySelector('p').innerText = "エラーが発生しました: " + error;
             }
-            // ページをリロードしてログ削除機能などを反映
-            window.location.reload();
         });
 
         function appendMessage(text, role) {
@@ -186,6 +184,29 @@ HTML_TEMPLATE = """
 </html>
 """
 
+# --- ▼▼▼ ここに削除したルートを復活させます ▼▼▼ ---
+@app.route('/clear_file')
+def clear_file():
+    resp = make_response(redirect(url_for('home')))
+    saved_config = request.cookies.get('ai_config')
+    if saved_config:
+        try:
+            config = json.loads(saved_config)
+            config['file_name'] = ""
+            resp.set_cookie('ai_config', json.dumps(config), max_age=365*24*60*60)
+        except (json.JSONDecodeError, TypeError):
+            resp.delete_cookie('ai_config')
+    return resp
+
+# (ログ削除機能は一旦コメントアウト。必要に応じて復活させてください)
+# @app.route('/delete/<log_id>')
+# def delete_log(log_id):
+#     try:
+#         db.collection('conversations').document(log_id).delete()
+#     except Exception as e:
+#         print(f"Error deleting log: {e}")
+#     return redirect(url_for('home'))
+
 # --- メインページ表示用のルート ---
 @app.route('/', methods=['GET'])
 def home():
@@ -195,7 +216,6 @@ def home():
         try: config = json.loads(saved_config)
         except (json.JSONDecodeError, TypeError): pass
     
-    # デフォルト値を設定
     config.setdefault('model_name', 'gemini-1.5-flash')
     config.setdefault('temperature', 1.0)
     config.setdefault('system_instruction', "あなたは親切で優秀なAIアシスタントです。")
@@ -203,7 +223,6 @@ def home():
 
     display_history = []
     try:
-        # DBに保存するデータ構造を変更したため、以前のログは表示されない可能性があります
         docs = db.collection('conversations').order_by('timestamp').stream()
         for doc in docs:
             display_history.append(doc.to_dict())
@@ -216,7 +235,6 @@ def home():
 @app.route('/stream_chat', methods=['POST'])
 def stream_chat():
     def generate():
-        # フォームから全データを取得
         user_prompt = request.form.get('prompt', "")
         model_name = request.form.get('model_name', 'gemini-1.5-flash')
         system_instruction = request.form.get('system_instruction', "")
@@ -241,7 +259,6 @@ def stream_chat():
             if file_content:
                 final_prompt = f"以下の知識ファイルを元に回答してください。\n---知識ファイル---\n{file_content}\n--------------\nユーザーの質問: {user_prompt}"
 
-            # ストリーミングモードで応答を生成
             response_stream = model.generate_content(final_prompt, stream=True)
             
             for chunk in response_stream:
@@ -249,19 +266,15 @@ def stream_chat():
                     full_ai_response += chunk.text
                     yield chunk.text
             
-            # データベースへの保存
             utc_now = datetime.datetime.now(datetime.timezone.utc)
             db.collection('conversations').add({'role': 'user', 'text': user_prompt, 'timestamp': utc_now})
-            # 応答が完了してから少しだけタイムスタンプをずらす
             db.collection('conversations').add({'role': 'model', 'text': full_ai_response, 'timestamp': utc_now + datetime.timedelta(microseconds=1)})
-
         except Exception as e:
             print(f"Error during generation: {e}")
             yield f"API呼び出し中にエラーが発生しました: {e}"
 
     return Response(stream_with_context(generate()), mimetype='text/plain')
 
-# (ファイルクリアやログ削除のルートは簡略化のため一旦削除します)
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)), debug=True)
