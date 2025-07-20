@@ -3,27 +3,21 @@ import datetime
 import json
 import requests
 from flask import Flask, request, render_template_string, redirect, url_for, Response, stream_with_context, session, abort
+from urllib.parse import unquote
 from google.cloud import firestore
 from google_auth_oauthlib.flow import Flow
 
-# --- Initial Setup ---
+# --- 1. Initial Setup ---
 app = Flask(__name__)
 
-# --- Secret & Environment Variable Loading ---
-try:
-    # This block runs on Cloud Run
-    app.secret_key = os.environ.get('FLASK_SECRET_KEY')
-    GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
-    GOOGLE_CLIENT_ID = os.environ.get('GOOGLE_CLIENT_ID')
-    GOOGLE_CLIENT_SECRET = os.environ.get('GOOGLE_CLIENT_SECRET')
-    REDIRECT_URI = os.environ.get('REDIRECT_URI')
-except Exception as e:
-    # This block is for local development fallback
-    print(f"Warning: Could not load secrets from environment. Using local fallbacks. Error: {e}")
-    app.secret_key = 'a-strong-dev-secret-key-for-local-testing'
-    GEMINI_API_KEY, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, REDIRECT_URI = (None,)*4
+# --- 2. Load Configuration from Environment Variables ---
+app.secret_key = os.environ.get('FLASK_SECRET_KEY')
+GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
+GOOGLE_CLIENT_ID = os.environ.get('GOOGLE_CLIENT_ID')
+GOOGLE_CLIENT_SECRET = os.environ.get('GOOGLE_CLIENT_SECRET')
+REDIRECT_URI = os.environ.get('REDIRECT_URI')
 
-# --- Firestore & Gemini Client ---
+# --- 3. Initialize Clients ---
 db = firestore.Client()
 genai = None
 if GEMINI_API_KEY:
@@ -33,22 +27,21 @@ if GEMINI_API_KEY:
     except ImportError:
         pass
 
-# --- OAuth 2.0 Flow Configuration ---
 os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
 flow = None
 if GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET and REDIRECT_URI:
     flow = Flow.from_client_config(
         client_config={ "web": {
-                "client_id": GOOGLE_CLIENT_ID, "client_secret": GOOGLE_CLIENT_SECRET,
-                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-                "token_uri": "https://oauth2.googleapis.com/token",
-                "redirect_uris": [REDIRECT_URI],
+            "client_id": GOOGLE_CLIENT_ID, "client_secret": GOOGLE_CLIENT_SECRET,
+            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "redirect_uris": [REDIRECT_URI],
         }},
         scopes=["openid", "https://www.googleapis.com/auth/userinfo.email", "https://www.googleapis.com/auth/userinfo.profile"],
         redirect_uri=REDIRECT_URI
     )
 
-# --- HTML Template ---
+# --- 4. HTML Template ---
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="ja"><head><title>AI Chat Final</title><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta charset="UTF-8">
@@ -141,7 +134,7 @@ HTML_TEMPLATE = """
                 const config = JSON.parse('{{ config|tojson|safe }}');
                 const models = ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-1.0-pro'];
                 const modelSelect = document.getElementById('model_name');
-                modelSelect.innerHTML = ''; // Clear existing options before adding new ones
+                modelSelect.innerHTML = '';
                 models.forEach(model => {
                     const option = document.createElement('option');
                     option.value = model;
@@ -168,25 +161,16 @@ HTML_TEMPLATE = """
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify(settings)
                     });
-                } catch (error) {
-                    console.error("Failed to save settings:", error);
-                }
+                } catch (error) { console.error("Failed to save settings:", error); }
             }
 
-            // --- ▼▼▼ BUG FIX: Attach event listeners AFTER loading initial settings ▼▼▼ ---
-            document.addEventListener('DOMContentLoaded', () => {
-                if(isLoggedIn) {
-                    loadSettings(); // Load settings passed from server first
-                    // Then attach listeners that save changes
-                    ['model_name', 'temperature', 'system_instruction'].forEach(id => {
-                        const el = document.getElementById(id);
-                        el.addEventListener('change', saveSettings);
-                        el.addEventListener('input', saveSettings);
-                    });
-                }
-                chatHistory.scrollTop = chatHistory.scrollHeight;
+            ['model_name', 'temperature', 'system_instruction'].forEach(id => {
+                const el = document.getElementById(id);
+                el.addEventListener('change', saveSettings);
+                el.addEventListener('input', saveSettings);
             });
-
+            
+            document.addEventListener('DOMContentLoaded', () => { if(isLoggedIn) loadSettings(); });
 
             fileInput.addEventListener('change', (event) => {
                 const newFiles = Array.from(event.target.files);
@@ -224,9 +208,6 @@ HTML_TEMPLATE = """
                 promptInput.value = ''; promptInput.style.height = 'auto';
                 const modelBubble = appendMessage('...', 'model');
                 
-                // On submission, we save the latest settings just in case
-                await saveSettings();
-
                 const payload = {
                     prompt: userPrompt,
                     model_name: document.getElementById('model_name').value,
@@ -262,7 +243,6 @@ HTML_TEMPLATE = """
                 return bubbleDiv;
             }
         }
-        // --- Theme Management ---
         const themeToggle = document.getElementById('theme-toggle');
         themeToggle.addEventListener('click', () => {
             document.body.classList.toggle('dark-mode');
@@ -270,6 +250,10 @@ HTML_TEMPLATE = """
         });
         document.addEventListener('DOMContentLoaded', () => {
             if (localStorage.getItem('theme') === 'dark') { document.body.classList.add('dark-mode'); }
+            if(isLoggedIn) {
+                // DOMが完全に読み込まれてから設定をロードし、イベントリスナーをアタッチ
+                loadSettings();
+            }
             chatHistory.scrollTop = chatHistory.scrollHeight;
         });
     </script>
@@ -277,8 +261,7 @@ HTML_TEMPLATE = """
 </html>
 """
 
-# --- Google OAuth Routes and Main App Routes ---
-# (Pythonのバックエンド部分は前回から変更ありません)
+# --- Google OAuth Routes ---
 @app.route('/login')
 def login():
     if not flow: return "OAuth 2.0 has not been configured in the server environment.", 500
@@ -303,6 +286,7 @@ def callback():
         print(f"Error during OAuth callback: {e}")
     return redirect(url_for('home'))
 
+# --- Main App Routes ---
 @app.route('/', methods=['GET'])
 def home():
     user_data = None
@@ -321,14 +305,13 @@ def home():
             
     return render_template_string(HTML_TEMPLATE, user=user_data, history=history, config=config, flow_available=bool(flow))
 
+# --- API Routes for JavaScript ---
 @app.route('/save_settings', methods=['POST'])
 def save_settings():
     if 'google_id' not in session: return abort(401)
     settings = request.get_json()
     user_id = session['google_id']
-    # Firestoreに保存する際、ファイル内容は含めない
-    settings_to_save = {k: v for k, v in settings.items() if k != 'knowledgeFiles'}
-    db.collection('users').document(user_id).set(settings_to_save, merge=True)
+    db.collection('users').document(user_id).set(settings, merge=True)
     return {"status": "success"}
     
 @app.route('/stream_chat', methods=['POST'])
@@ -342,13 +325,10 @@ def stream_chat():
             user_prompt = data.get('prompt', "")
             knowledge_files = data.get('knowledge_files', [])
             
-            # ▼▼▼ BUG FIX: チャット送信時にDBから最新の設定を読み込む ▼▼▼
+            # DBから最新の設定を読み込む（同期のため）
             settings_doc = db.collection('users').document(user_id).get()
-            if settings_doc.exists:
-                config = settings_doc.to_dict()
-            else:
-                config = {} # Fallback
-            
+            config = settings_doc.to_dict() if settings_doc.exists else {}
+
             model_name = config.get('model_name', 'gemini-1.5-flash')
             temperature = float(config.get('temperature', 1.0))
             system_instruction = config.get('system_instruction', "")
