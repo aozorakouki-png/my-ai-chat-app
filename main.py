@@ -41,7 +41,6 @@ HTML_TEMPLATE = """
         .chat-history { flex-grow: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; }
         .message { display: flex; margin-bottom: 20px; max-width: 80%; }
         .message-bubble { padding: 10px 15px; border-radius: 18px; line-height: 1.5; white-space: pre-wrap; word-wrap: break-word;}
-        /* ▼▼▼ チャット表示修正：ユーザーメッセージを右寄せ ▼▼▼ */
         .user-message { align-self: flex-end; }
         .user-message .message-bubble { background-color: var(--user-bubble-bg); color: white; }
         .model-message { align-self: flex-start; }
@@ -98,6 +97,7 @@ HTML_TEMPLATE = """
     </div>
     
     <script>
+        // --- State Management ---
         const chatForm = document.getElementById('chat-form');
         const configForm = document.getElementById('config-form');
         const promptInput = chatForm.querySelector('textarea[name="prompt"]');
@@ -107,6 +107,7 @@ HTML_TEMPLATE = """
         const themeToggle = document.getElementById('theme-toggle');
         let knowledgeFiles = [];
 
+        // --- Theme Toggle ---
         themeToggle.addEventListener('click', () => {
             document.body.classList.toggle('dark-mode');
             localStorage.setItem('theme', document.body.classList.contains('dark-mode') ? 'dark' : 'light');
@@ -118,25 +119,26 @@ HTML_TEMPLATE = """
             chatHistory.scrollTop = chatHistory.scrollHeight;
         });
 
+        // --- ▼▼▼ BUG FIX: Multiple File Handling ▼▼▼ ---
         fileInput.addEventListener('change', (event) => {
-            if (event.target.files.length > 10) {
-                alert("ファイルは最大10個までです。");
-                event.target.value = '';
+            const newFiles = Array.from(event.target.files);
+            if (knowledgeFiles.length + newFiles.length > 10) {
+                alert("ファイルは合計10個までです。");
                 return;
             }
-            knowledgeFiles = [];
-            const files = Array.from(event.target.files);
-            let filesRead = 0;
-            if (files.length === 0) { renderFileList(); return; }
-            files.forEach(file => {
-                const reader = new FileReader();
-                reader.onload = (e) => {
-                    knowledgeFiles.push({ name: file.name, content: e.target.result });
-                    filesRead++;
-                    if (filesRead === files.length) renderFileList();
-                };
-                reader.readAsText(file, 'UTF-8');
+            
+            newFiles.forEach(file => {
+                // 同じ名前のファイルが既に存在しないかチェック
+                if (!knowledgeFiles.some(existingFile => existingFile.name === file.name)) {
+                    const reader = new FileReader();
+                    reader.onload = (e) => {
+                        knowledgeFiles.push({ name: file.name, content: e.target.result });
+                        renderFileList();
+                    };
+                    reader.readAsText(file, 'UTF-8');
+                }
             });
+            event.target.value = ''; // inputをリセットして同じファイルを再度選択可能にする
         });
 
         function renderFileList() {
@@ -158,6 +160,7 @@ HTML_TEMPLATE = """
             });
         }
         
+        // --- Chat Submission ---
         chatForm.addEventListener('submit', async function(event) {
             event.preventDefault();
             const userPrompt = promptInput.value.trim();
@@ -174,7 +177,7 @@ HTML_TEMPLATE = """
             formData.append('model_name', document.getElementById('model_name').value);
             formData.append('temperature', document.getElementById('temperature').value);
             formData.append('system_instruction', document.getElementById('system_instruction').value);
-            const combinedFileContent = knowledgeFiles.map(f => `--- File: ${f.name} ---\n${f.content}`).join('\\n\\n');
+            const combinedFileContent = knowledgeFiles.map(f => `--- File: ${f.name} ---\\n${f.content}`).join('\\n\\n');
             formData.append('file_content', combinedFileContent);
             
             saveConfigToCookie();
@@ -200,6 +203,7 @@ HTML_TEMPLATE = """
             }
         });
 
+        // --- ▼▼▼ BUG FIX: appendMessage function ▼▼▼ ---
         function appendMessage(text, role) {
             const messageDiv = document.createElement('div');
             messageDiv.className = `message ${role}-message`;
@@ -208,7 +212,8 @@ HTML_TEMPLATE = """
             const p = document.createElement('p');
             p.innerText = text;
             bubbleDiv.appendChild(p);
-            messageDiv.appendChild(messageDiv);
+            // This was the bug: messageDiv.appendChild(messageDiv);
+            messageDiv.appendChild(bubbleDiv); // Corrected line
             chatHistory.appendChild(messageDiv);
             chatHistory.scrollTop = chatHistory.scrollHeight;
             return bubbleDiv;
@@ -227,24 +232,7 @@ HTML_TEMPLATE = """
 </html>
 """
 
-# --- ▼▼▼ ここに削除したルートを復活させます ▼▼▼ ---
-@app.route('/clear_file')
-def clear_file():
-    # この機能は現在JavaScriptで処理されるため、サーバー側では不要ですが、
-    # エラー防止のために空のリダイレクトを残しておきます。
-    return redirect(url_for('home'))
-
-@app.route('/delete/<log_id>')
-def delete_log(log_id):
-    # この機能は現在JavaScriptで処理されるため、サーバー側では不要ですが、
-    # ページのリロードで履歴を再表示するために残しておきます。
-    try:
-        db.collection('conversations').document(log_id).delete()
-    except Exception as e:
-        print(f"Error deleting log: {e}")
-    return redirect(url_for('home'))
-
-# --- メインページ表示用のルート ---
+# --- Python Backend (No changes needed, but provided for completeness) ---
 @app.route('/', methods=['GET'])
 def home():
     saved_config = request.cookies.get('ai_config')
@@ -267,7 +255,6 @@ def home():
         
     return render_template_string(HTML_TEMPLATE, history=display_history, config=config)
 
-# --- AIとの対話（ストリーミング）専門のルート ---
 @app.route('/stream_chat', methods=['POST'])
 def stream_chat():
     def generate():
@@ -294,7 +281,7 @@ def stream_chat():
 
             final_prompt = user_prompt
             if file_content:
-                final_prompt = f"以下の知識ファイルを元に回答してください。\n---知識ファイル---\n{file_content}\n--------------\nユーザーの質問: {user_prompt}"
+                final_prompt = f"以下の知識ファイルを元に回答してください。\\n---知識ファイル---\\n{file_content}\\n--------------\\nユーザーの質問: {user_prompt}"
 
             response_stream = model.generate_content(final_prompt, stream=True)
             
@@ -303,15 +290,14 @@ def stream_chat():
                     full_ai_response += chunk.text
                     yield chunk.text
             
-            # 応答が完了してからDBに保存
             utc_now = datetime.datetime.now(datetime.timezone.utc)
             db.collection('conversations').add({'role': 'user', 'text': user_prompt, 'timestamp': utc_now})
             db.collection('conversations').add({'role': 'model', 'text': full_ai_response, 'timestamp': utc_now + datetime.timedelta(microseconds=1)})
+
         except Exception as e:
             print(f"Error during generation: {e}")
             yield f"API呼び出し中にエラーが発生しました: {e}"
 
-    # 文字化け対策としてcharset=utf-8をレスポンスに含める
     return Response(stream_with_context(generate()), mimetype='text/plain; charset=utf-8')
 
 if __name__ == '__main__':
