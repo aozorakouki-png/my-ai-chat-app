@@ -3,46 +3,37 @@ import datetime
 import json
 import requests
 from flask import Flask, request, render_template_string, redirect, url_for, Response, stream_with_context, session, abort
+from google.cloud import firestore
+from google_auth_oauthlib.flow import Flow
+# ▼▼▼ BUG FIX: Import genai at the top level ▼▼▼
+import google.generativeai as genai
 
 # --- 1. Initial Setup ---
 app = Flask(__name__)
 app.secret_key = os.environ.get('FLASK_SECRET_KEY')
 
-# --- 2. Load Environment Variables ---
+# --- 2. Load Configuration and Initialize Clients ---
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
 GOOGLE_CLIENT_ID = os.environ.get('GOOGLE_CLIENT_ID')
 GOOGLE_CLIENT_SECRET = os.environ.get('GOOGLE_CLIENT_SECRET')
 REDIRECT_URI = os.environ.get('REDIRECT_URI')
 
-# --- 3. Lazy Initializers ---
+# ▼▼▼ BUG FIX: Configure the genai client directly ▼▼▼
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+else:
+    print("WARNING: GEMINI_API_KEY environment variable not set.")
+
 db_client = None
 def get_db():
     global db_client
     if db_client is None:
-        from google.cloud import firestore
         db_client = firestore.Client()
     return db_client
-
-# ▼▼▼ BUG FIX: Use a reliable lazy initializer for the GenAI client ▼▼▼
-genai_client = None
-def get_genai():
-    global genai_client
-    if genai_client is None:
-        if GEMINI_API_KEY:
-            try:
-                import google.generativeai as genai
-                genai.configure(api_key=GEMINI_API_KEY)
-                genai_client = genai
-            except ImportError:
-                print("Error: google.generativeai library not found.")
-                pass
-    return genai_client
-# --- ▲▲▲ End of BUG FIX ▲▲▲ ---
 
 def get_oauth_flow():
     if not (GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET and REDIRECT_URI):
         return None
-    from google_auth_oauthlib.flow import Flow
     os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
     return Flow.from_client_config(
         client_config={ "web": {
@@ -55,10 +46,10 @@ def get_oauth_flow():
         redirect_uri=REDIRECT_URI
     )
 
-# --- 4. HTML Template (No changes) ---
+# --- 3. HTML Template (No changes) ---
 HTML_TEMPLATE = """
 <!DOCTYPE html>
-<html lang="ja"><head><title>AI Chat Final</title><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta charset="UTF-8">
+<html lang="ja"><head><title>AI Chat</title><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta charset="UTF-8">
 <style>
     :root { --bg-color: #f7f9fc; --text-color: #000; --sidebar-bg: #ffffff; --border-color: #ddd; --user-bubble-bg: #0b93f6; --model-bubble-bg: #e5e5ea; --input-area-bg: #f0f2f5; }
     body.dark-mode { --bg-color: #121212; --text-color: #e0e0e0; --sidebar-bg: #1e1e1e; --border-color: #444; --user-bubble-bg: #377dff; --model-bubble-bg: #333333; --input-area-bg: #2a2a2a; }
@@ -139,12 +130,8 @@ HTML_TEMPLATE = """
             localStorage.setItem('theme', document.body.classList.contains('dark-mode') ? 'dark' : 'light');
         });
         document.addEventListener('DOMContentLoaded', () => {
-            if (localStorage.getItem('theme') === 'dark') {
-                document.body.classList.add('dark-mode');
-            }
-            if(isLoggedIn) {
-                initializeChat();
-            }
+            if (localStorage.getItem('theme') === 'dark') { document.body.classList.add('dark-mode'); }
+            if (isLoggedIn) { initializeChat(); }
         });
 
         function initializeChat() {
@@ -168,7 +155,6 @@ HTML_TEMPLATE = """
             function loadSettings() {
                 const savedSettings = JSON.parse(localStorage.getItem('ai_settings')) || {};
                 const savedFiles = JSON.parse(localStorage.getItem('knowledge_files')) || [];
-                
                 const models = ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-1.0-pro'];
                 const modelSelect = document.getElementById('model_name');
                 modelSelect.innerHTML = '';
@@ -190,7 +176,7 @@ HTML_TEMPLATE = """
                 el.addEventListener('change', saveSettings);
                 el.addEventListener('input', saveSettings);
             });
-            
+
             fileInput.addEventListener('change', (event) => {
                 const newFiles = Array.from(event.target.files);
                 if (knowledgeFiles.length + newFiles.length > 10) { alert("ファイルは合計10個までです。"); return; }
@@ -226,6 +212,8 @@ HTML_TEMPLATE = """
                 appendMessage(userPrompt, 'user');
                 promptInput.value = ''; promptInput.style.height = 'auto';
                 const modelBubble = appendMessage('...', 'model');
+                
+                saveSettings();
                 
                 const payload = {
                     prompt: userPrompt,
@@ -270,7 +258,7 @@ HTML_TEMPLATE = """
 </html>
 """
 
-# --- 5. Python Backend with Lazy Initialization ---
+# --- 5. Python Backend Routes ---
 @app.route('/login')
 def login():
     flow = get_oauth_flow()
@@ -325,15 +313,14 @@ def stream_chat():
             system_instruction = data.get('system_instruction', "")
             knowledge_files = data.get('knowledge_files', [])
             
-            # ▼▼▼ BUG FIX: Use the get_genai() function to ensure client is initialized ▼▼▼
-            genai_client = get_genai()
-            if not (genai_client and user_prompt):
+            # ▼▼▼ BUG FIX: Use the global genai object, which is now correctly initialized ▼▼▼
+            if not (genai and user_prompt):
                 yield "エラー: GEMINI_API_KEYが設定されていないか、プロンプトが空です。"
                 return
 
-            model = genai_client.GenerativeModel(
+            model = genai.GenerativeModel(
                 model_name=model_name,
-                generation_config=genai.GenerativeModel.GenerationConfig(temperature=temperature),
+                generation_config=genai.GenerationConfig(temperature=temperature),
                 system_instruction=system_instruction,
             )
             final_prompt = user_prompt
