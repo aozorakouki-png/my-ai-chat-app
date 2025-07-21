@@ -7,38 +7,12 @@ from flask import Flask, request, render_template_string, redirect, url_for, Res
 # --- 1. Initial Setup ---
 app = Flask(__name__)
 
-# --- 2. Load Configuration from Environment Variables ---
+# --- 2. Load Basic Configuration from Environment Variables ---
+# ここでは、すぐに必要で、かつ失敗しない設定のみを読み込みます
 app.secret_key = os.environ.get('FLASK_SECRET_KEY')
-GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
-GOOGLE_CLIENT_ID = os.environ.get('GOOGLE_CLIENT_ID')
-GOOGLE_CLIENT_SECRET = os.environ.get('GOOGLE_CLIENT_SECRET')
-REDIRECT_URI = os.environ.get('REDIRECT_URI')
 
-# --- 3. Initialize Clients ---
-db = firestore.Client()
-genai = None
-if GEMINI_API_KEY:
-    try:
-        import google.generativeai as genai
-        genai.configure(api_key=GEMINI_API_KEY)
-    except ImportError:
-        pass
-
-os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
-flow = None
-if GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET and REDIRECT_URI:
-    flow = Flow.from_client_config(
-        client_config={ "web": {
-                "client_id": GOOGLE_CLIENT_ID, "client_secret": GOOGLE_CLIENT_SECRET,
-                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-                "token_uri": "https://oauth2.googleapis.com/token",
-                "redirect_uris": [REDIRECT_URI],
-        }},
-        scopes=["openid", "https://www.googleapis.com/auth/userinfo.email", "https://www.googleapis.com/auth/userinfo.profile"],
-        redirect_uri=REDIRECT_URI
-    )
-
-# --- 4. HTML Template ---
+# --- 3. HTML Template ---
+# (HTMLとJavaScriptは変更ありません)
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="ja"><head><title>AI Chat Final</title><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta charset="UTF-8">
@@ -127,7 +101,6 @@ HTML_TEMPLATE = """
             const fileListDiv = document.getElementById('file-list');
             let knowledgeFiles = [];
 
-            // ▼▼▼ BUG FIX: Use localStorage for files, server data for settings ▼▼▼
             function loadSettings() {
                 const config = JSON.parse('{{ config|tojson|safe }}');
                 const models = ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-1.0-pro'];
@@ -142,13 +115,8 @@ HTML_TEMPLATE = """
                 });
                 document.getElementById('temperature').value = config.temperature || 1.0;
                 document.getElementById('system_instruction').value = config.system_instruction || 'あなたは親切で優秀なAIアシスタントです。';
-                
-                // Load knowledge files from localStorage
-                const savedFiles = localStorage.getItem('knowledgeFiles');
-                if(savedFiles) {
-                    knowledgeFiles = JSON.parse(savedFiles);
-                    renderFileList();
-                }
+                knowledgeFiles = JSON.parse(localStorage.getItem('knowledgeFiles') || '[]');
+                renderFileList();
             }
 
             async function saveSettings() {
@@ -157,29 +125,19 @@ HTML_TEMPLATE = """
                     temperature: document.getElementById('temperature').value,
                     system_instruction: document.getElementById('system_instruction').value,
                 };
-                //知識ファイルはLocalStorageにのみ保存
                 localStorage.setItem('knowledgeFiles', JSON.stringify(knowledgeFiles));
-
                 try {
-                    await fetch('/save_settings', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify(settings)
-                    });
+                    await fetch('/save_settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(settings) });
                 } catch (error) { console.error("Failed to save settings:", error); }
             }
             
-            document.addEventListener('DOMContentLoaded', () => {
-                if(isLoggedIn) {
-                    loadSettings();
-                    ['model_name', 'temperature', 'system_instruction'].forEach(id => {
-                        const el = document.getElementById(id);
-                        el.addEventListener('change', saveSettings);
-                        el.addEventListener('input', saveSettings);
-                    });
-                }
+            ['model_name', 'temperature', 'system_instruction'].forEach(id => {
+                const el = document.getElementById(id);
+                el.addEventListener('change', saveSettings);
+                el.addEventListener('input', saveSettings);
             });
-            // --- End of Settings Management ---
+            
+            document.addEventListener('DOMContentLoaded', () => { if(isLoggedIn) loadSettings(); });
 
             fileInput.addEventListener('change', (event) => {
                 const newFiles = Array.from(event.target.files);
@@ -218,12 +176,8 @@ HTML_TEMPLATE = """
                 const modelBubble = appendMessage('...', 'model');
                 
                 await saveSettings();
-
                 const payload = {
                     prompt: userPrompt,
-                    model_name: document.getElementById('model_name').value,
-                    temperature: document.getElementById('temperature').value,
-                    system_instruction: document.getElementById('system_instruction').value,
                     knowledge_files: knowledgeFiles
                 };
                 
@@ -261,9 +215,7 @@ HTML_TEMPLATE = """
         });
         document.addEventListener('DOMContentLoaded', () => {
             if (localStorage.getItem('theme') === 'dark') { document.body.classList.add('dark-mode'); }
-            if(isLoggedIn) {
-                loadSettings();
-            }
+            if(isLoggedIn) loadSettings();
             chatHistory.scrollTop = chatHistory.scrollHeight;
         });
     </script>
@@ -271,61 +223,94 @@ HTML_TEMPLATE = """
 </html>
 """
 
-# --- Python Backend ---
-# (OAuth routes remain the same)
+# --- 5. Python Backend with Lazy Initialization ---
+db_client = None
+def get_db():
+    global db_client
+    if db_client is None:
+        db_client = firestore.Client()
+    return db_client
+
+# --- Google OAuth Routes ---
 @app.route('/login')
 def login():
-    if not flow: return "OAuth is not configured.", 500
-    authorization_url, state = flow.authorization_url()
+    # Only initialize flow when needed
+    if not (GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET and REDIRECT_URI):
+        return "OAuth 2.0 has not been configured in the server environment.", 500
+    
+    flow = Flow.from_client_config(
+        client_config={ "web": { "client_id": GOOGLE_CLIENT_ID, "client_secret": GOOGLE_CLIENT_SECRET, "auth_uri": "https://accounts.google.com/o/oauth2/auth", "token_uri": "https://oauth2.googleapis.com/token", "redirect_uris": [REDIRECT_URI] }},
+        scopes=["openid", "https://www.googleapis.com/auth/userinfo.email", "https://www.googleapis.com/auth/userinfo.profile"],
+        redirect_uri=REDIRECT_URI
+    )
+    authorization_url, state = flow.authorization_url(access_type='offline', include_granted_scopes='true')
     session['state'] = state
     return redirect(authorization_url)
+
 @app.route('/logout')
 def logout():
     session.clear()
     return redirect(url_for('home'))
+
 @app.route('/callback')
 def callback():
-    if not flow: return "OAuth is not configured.", 500
+    if not (GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET and REDIRECT_URI):
+        return "OAuth 2.0 has not been configured in the server environment.", 500
+    
+    flow = Flow.from_client_config(
+        client_config={ "web": { "client_id": GOOGLE_CLIENT_ID, "client_secret": GOOGLE_CLIENT_SECRET, "auth_uri": "https://accounts.google.com/o/oauth2/auth", "token_uri": "https://oauth2.googleapis.com/token", "redirect_uris": [REDIRECT_URI] }},
+        scopes=["openid", "https://www.googleapis.com/auth/userinfo.email", "https://www.googleapis.com/auth/userinfo.profile"],
+        redirect_uri=REDIRECT_URI
+    )
     try:
         flow.fetch_token(authorization_response=request.url)
         creds = flow.credentials
-        user_info_resp = requests.get('https://www.googleapis.com/oauth2/v1/userinfo', headers={'Authorization': f'Bearer {creds.token}'})
-        user_info = user_info_resp.json()
+        user_info_response = requests.get('https://www.googleapis.com/oauth2/v1/userinfo', headers={'Authorization': f'Bearer {creds.token}'})
+        user_info = user_info_response.json()
         session['google_id'] = user_info['id']
         session['name'] = user_info['name']
     except Exception as e:
-        print(f"Error during callback: {e}")
+        print(f"Error during OAuth callback: {e}")
     return redirect(url_for('home'))
 
+# --- Main App Routes ---
 @app.route('/', methods=['GET'])
 def home():
     user_data = None
     config = {}
     history = []
+    flow_available = bool(GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET and REDIRECT_URI)
+
     if 'google_id' in session:
         user_data = session
         user_id = session['google_id']
+        db = get_db()
         settings_doc_ref = db.collection('users').document(user_id)
         settings_doc = settings_doc_ref.get()
+        
         if settings_doc.exists:
             config = settings_doc.to_dict()
         else:
-            config = {"model_name": "gemini-1.5-flash", "temperature": 1.0, "system_instruction": "あなたは親切で優秀なAIアシスタントです。"}
-            settings_doc_ref.set(config) # Create initial settings for new user
+            config = {
+                "model_name": "gemini-1.5-flash", "temperature": 1.0,
+                "system_instruction": "あなたは親切で優秀なAIアシスタントです。"
+            }
+            settings_doc_ref.set(config)
         
         docs = db.collection('users').document(user_id).collection('conversations').order_by('timestamp').limit(50).stream()
         for doc in docs:
             history.append(doc.to_dict())
-    return render_template_string(HTML_TEMPLATE, user=user_data, history=history, config=config, flow_available=bool(flow))
+            
+    return render_template_string(HTML_TEMPLATE, user=user_data, history=history, config=config, flow_available=flow_available)
 
+# --- API Routes for JavaScript ---
 @app.route('/save_settings', methods=['POST'])
 def save_settings():
     if 'google_id' not in session: return abort(401)
     settings = request.get_json()
     user_id = session['google_id']
-    # ▼▼▼ BUG FIX: Do NOT save knowledgeFiles to Firestore ▼▼▼
     settings_to_save = {k: v for k, v in settings.items() if k != 'knowledgeFiles'}
-    db.collection('users').document(user_id).set(settings_to_save, merge=True)
+    get_db().collection('users').document(user_id).set(settings_to_save, merge=True)
     return {"status": "success"}
     
 @app.route('/stream_chat', methods=['POST'])
@@ -337,17 +322,25 @@ def stream_chat():
         try:
             data = request.get_json()
             user_prompt = data.get('prompt', "")
-            # (Settings are now saved via /save_settings, so we just use them here)
-            model_name = data.get('model_name', 'gemini-1.5-flash')
-            temperature = float(data.get('temperature', 1.0))
-            system_instruction = data.get('system_instruction', "")
             knowledge_files = data.get('knowledge_files', [])
+            
+            db = get_db()
+            settings_doc = db.collection('users').document(user_id).get()
+            config = settings_doc.to_dict() if settings_doc.exists else {}
+
+            model_name = config.get('model_name', 'gemini-1.5-flash')
+            temperature = float(config.get('temperature', 1.0))
+            system_instruction = config.get('system_instruction', "")
             
             if not (genai and user_prompt):
                 yield "エラー: 設定が不十分か、プロンプトが空です。"
                 return
 
-            model = genai.GenerativeModel(model_name=model_name, generation_config=genai.GenerationConfig(temperature=temperature), system_instruction=system_instruction)
+            model = genai.GenerativeModel(
+                model_name=model_name,
+                generation_config=genai.GenerationConfig(temperature=temperature),
+                system_instruction=system_instruction,
+            )
             final_prompt = user_prompt
             if knowledge_files:
                 combined_content = "\\n\\n".join([f"--- File: {f['name']} ---\\n{f['content']}" for f in knowledge_files])
