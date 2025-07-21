@@ -4,17 +4,11 @@ import json
 import requests
 from flask import Flask, request, render_template_string, redirect, url_for, Response, stream_with_context, session, abort
 
-# --- 1. Initial Setup ---
+# --- 1. Initial Setup: Keep it simple ---
 app = Flask(__name__)
-
-# --- 2. Load Configuration from Environment Variables ---
 app.secret_key = os.environ.get('FLASK_SECRET_KEY')
-GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
-GOOGLE_CLIENT_ID = os.environ.get('GOOGLE_CLIENT_ID')
-GOOGLE_CLIENT_SECRET = os.environ.get('GOOGLE_CLIENT_SECRET')
-REDIRECT_URI = os.environ.get('REDIRECT_URI')
 
-# --- 3. Initialize Clients ---
+# --- 2. Lazy Initializers: Initialize clients only when needed ---
 db_client = None
 def get_db():
     global db_client
@@ -23,18 +17,44 @@ def get_db():
         db_client = firestore.Client()
     return db_client
 
-genai = None
-if GEMINI_API_KEY:
-    try:
-        import google.generativeai as genai
-        genai.configure(api_key=GEMINI_API_KEY)
-    except ImportError:
-        pass
+genai_client = None
+def get_genai():
+    global genai_client
+    if genai_client is None:
+        try:
+            import google.generativeai as genai
+            GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
+            if GEMINI_API_KEY:
+                genai.configure(api_key=GEMINI_API_KEY)
+                genai_client = genai
+        except ImportError:
+            pass
+    return genai_client
 
-# --- 4. HTML Template ---
+def get_oauth_flow():
+    GOOGLE_CLIENT_ID = os.environ.get('GOOGLE_CLIENT_ID')
+    GOOGLE_CLIENT_SECRET = os.environ.get('GOOGLE_CLIENT_SECRET')
+    REDIRECT_URI = os.environ.get('REDIRECT_URI')
+    if not (GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET and REDIRECT_URI):
+        return None
+    
+    from google_auth_oauthlib.flow import Flow
+    os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
+    return Flow.from_client_config(
+        client_config={ "web": {
+            "client_id": GOOGLE_CLIENT_ID, "client_secret": GOOGLE_CLIENT_SECRET,
+            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "redirect_uris": [REDIRECT_URI],
+        }},
+        scopes=["openid", "https://www.googleapis.com/auth/userinfo.email", "https://www.googleapis.com/auth/userinfo.profile"],
+        redirect_uri=REDIRECT_URI
+    )
+
+# --- 3. HTML Template ---
 HTML_TEMPLATE = """
 <!DOCTYPE html>
-<html lang="ja"><head><title>AI Chat</title><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta charset="UTF-8">
+<html lang="ja"><head><title>AI Chat Final</title><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta charset="UTF-8">
 <style>
     :root { --bg-color: #f7f9fc; --text-color: #000; --sidebar-bg: #ffffff; --border-color: #ddd; --user-bubble-bg: #0b93f6; --model-bubble-bg: #e5e5ea; --input-area-bg: #f0f2f5; }
     body.dark-mode { --bg-color: #121212; --text-color: #e0e0e0; --sidebar-bg: #1e1e1e; --border-color: #444; --user-bubble-bg: #377dff; --model-bubble-bg: #333333; --input-area-bg: #2a2a2a; }
@@ -88,104 +108,101 @@ HTML_TEMPLATE = """
             </div>
         </div>
         <div class="chat-wrapper">
-            <div class="chat-history" id="chat-history">
-                {% for item in history %}
-                <div class="message {% if item.role == 'user' %}user-message{% else %}model-message{% endif %}">
-                    <div class="message-bubble"><p>{{ item.text }}</p></div>
+             {% if not user %}
+                <div class="login-container">
+                    <h2>ようこそ</h2>
+                    <p>全ての機能を利用するには、Googleアカウントでログインしてください。</p>
                 </div>
-                {% endfor %}
-            </div>
-            <div class="input-area">
-                <form id="chat-form"><textarea name="prompt" placeholder="メッセージを入力..." required></textarea><button type="submit">↑</button></form>
-            </div>
+             {% else %}
+                <div class="chat-history" id="chat-history">
+                    {% for item in history %}
+                    <div class="message {% if item.role == 'user' %}user-message{% else %}model-message{% endif %}">
+                        <div class="message-bubble"><p>{{ item.text }}</p></div>
+                    </div>
+                    {% endfor %}
+                </div>
+                <div class="input-area">
+                    <form id="chat-form"><textarea name="prompt" placeholder="メッセージを入力..." required></textarea><button type="submit">↑</button></form>
+                </div>
+             {% endif %}
         </div>
     </div>
-    
     <script>
-        // --- ▼▼▼ BUG FIX: Simplified and robust JavaScript logic ▼▼▼ ---
-        document.addEventListener('DOMContentLoaded', () => {
-            const chatForm = document.getElementById('chat-form');
-            const promptInput = chatForm.querySelector('textarea[name="prompt"]');
-            const chatHistory = document.getElementById('chat-history');
-            const fileInput = document.getElementById('knowledge_file');
-            const fileListDiv = document.getElementById('file-list');
-            const themeToggle = document.getElementById('theme-toggle');
-            let knowledgeFiles = [];
+        const chatForm = document.getElementById('chat-form');
+        const promptInput = chatForm.querySelector('textarea[name="prompt"]');
+        const chatHistory = document.getElementById('chat-history');
+        const fileInput = document.getElementById('knowledge_file');
+        const fileListDiv = document.getElementById('file-list');
+        const themeToggle = document.getElementById('theme-toggle');
+        let knowledgeFiles = [];
+
+        function saveSettings() {
+            const settings = {
+                model_name: document.getElementById('model_name').value,
+                temperature: document.getElementById('temperature').value,
+                system_instruction: document.getElementById('system_instruction').value,
+            };
+            localStorage.setItem('ai_settings', JSON.stringify(settings));
+            localStorage.setItem('knowledge_files', JSON.stringify(knowledgeFiles));
+        }
+
+        function loadSettings() {
+            const savedSettings = JSON.parse(localStorage.getItem('ai_settings')) || {};
+            const savedFiles = JSON.parse(localStorage.getItem('knowledge_files')) || [];
             
-            // --- Theme Management ---
-            themeToggle.addEventListener('click', () => {
-                document.body.classList.toggle('dark-mode');
-                localStorage.setItem('theme', document.body.classList.contains('dark-mode') ? 'dark' : 'light');
+            const models = ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-1.0-pro'];
+            const modelSelect = document.getElementById('model_name');
+            modelSelect.innerHTML = '';
+            models.forEach(model => {
+                const option = document.createElement('option');
+                option.value = model;
+                option.text = model.replace(/gemini-|-pro|-flash/g, m => ({'gemini-': 'Gemini ', '-pro': ' Pro', '-flash': ' Flash'})[m]);
+                if (model === (savedSettings.model_name || 'gemini-1.5-flash')) { option.selected = true; }
+                modelSelect.appendChild(option);
             });
-            if (localStorage.getItem('theme') === 'dark') {
-                document.body.classList.add('dark-mode');
-            }
+            document.getElementById('temperature').value = savedSettings.temperature || 1.0;
+            document.getElementById('system_instruction').value = savedSettings.system_instruction || 'あなたは親切で優秀なAIアシスタントです。';
+            knowledgeFiles = savedFiles;
+            renderFileList();
+        }
 
-            // --- Settings Management (using localStorage) ---
-            function saveSettings() {
-                const settings = {
-                    model_name: document.getElementById('model_name').value,
-                    temperature: document.getElementById('temperature').value,
-                    system_instruction: document.getElementById('system_instruction').value,
-                    knowledgeFiles: knowledgeFiles
-                };
-                localStorage.setItem('ai_settings', JSON.stringify(settings));
-            }
+        ['model_name', 'temperature', 'system_instruction'].forEach(id => {
+            const el = document.getElementById(id);
+            el.addEventListener('change', saveSettings);
+            el.addEventListener('input', saveSettings);
+        });
+        
+        document.addEventListener('DOMContentLoaded', () => { loadSettings(); });
 
-            function loadSettings() {
-                const savedSettings = JSON.parse(localStorage.getItem('ai_settings')) || {};
-                const models = ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-1.0-pro'];
-                const modelSelect = document.getElementById('model_name');
-                modelSelect.innerHTML = '';
-                models.forEach(model => {
-                    const option = document.createElement('option');
-                    option.value = model;
-                    option.text = model.replace(/gemini-|-pro|-flash/g, m => ({'gemini-': 'Gemini ', '-pro': ' Pro', '-flash': ' Flash'})[m]);
-                    if (model === (savedSettings.model_name || 'gemini-1.5-flash')) { option.selected = true; }
-                    modelSelect.appendChild(option);
-                });
-                document.getElementById('temperature').value = savedSettings.temperature || 1.0;
-                document.getElementById('system_instruction').value = savedSettings.system_instruction || 'あなたは親切で優秀なAIアシスタントです。';
-                knowledgeFiles = savedSettings.knowledgeFiles || [];
-                renderFileList();
-            }
-
-            ['model_name', 'temperature', 'system_instruction'].forEach(id => {
-                const el = document.getElementById(id);
-                el.addEventListener('change', saveSettings);
-                el.addEventListener('input', saveSettings);
+        fileInput.addEventListener('change', (event) => {
+            const newFiles = Array.from(event.target.files);
+            if (knowledgeFiles.length + newFiles.length > 10) { alert("ファイルは合計10個までです。"); return; }
+            newFiles.forEach(file => {
+                if (!knowledgeFiles.some(f => f.name === file.name)) {
+                    const reader = new FileReader();
+                    reader.onload = (e) => {
+                        knowledgeFiles.push({ name: file.name, content: e.target.result });
+                        renderFileList();
+                        saveSettings();
+                    };
+                    reader.readAsText(file, 'UTF-8');
+                }
             });
+            event.target.value = '';
+        });
 
-            // --- File Management ---
-            fileInput.addEventListener('change', (event) => {
-                const newFiles = Array.from(event.target.files);
-                if (knowledgeFiles.length + newFiles.length > 10) { alert("ファイルは合計10個までです。"); return; }
-                newFiles.forEach(file => {
-                    if (!knowledgeFiles.some(f => f.name === file.name)) {
-                        const reader = new FileReader();
-                        reader.onload = (e) => {
-                            knowledgeFiles.push({ name: file.name, content: e.target.result });
-                            renderFileList();
-                            saveSettings();
-                        };
-                        reader.readAsText(file, 'UTF-8');
-                    }
-                });
-                event.target.value = '';
+        function renderFileList() {
+            fileListDiv.innerHTML = '';
+            knowledgeFiles.forEach((file, index) => {
+                const fileItem = document.createElement('div'); fileItem.className = 'file-item';
+                const fileNameSpan = document.createElement('span'); fileNameSpan.innerText = file.name;
+                const deleteBtn = document.createElement('button'); deleteBtn.innerText = '×';
+                deleteBtn.onclick = () => { knowledgeFiles.splice(index, 1); renderFileList(); saveSettings(); };
+                fileItem.appendChild(fileNameSpan); fileItem.appendChild(deleteBtn); fileListDiv.appendChild(fileItem);
             });
-
-            function renderFileList() {
-                fileListDiv.innerHTML = '';
-                knowledgeFiles.forEach((file, index) => {
-                    const fileItem = document.createElement('div'); fileItem.className = 'file-item';
-                    const fileNameSpan = document.createElement('span'); fileNameSpan.innerText = file.name;
-                    const deleteBtn = document.createElement('button'); deleteBtn.innerText = '×';
-                    deleteBtn.onclick = () => { knowledgeFiles.splice(index, 1); renderFileList(); saveSettings(); };
-                    fileItem.appendChild(fileNameSpan); fileItem.appendChild(deleteBtn); fileListDiv.appendChild(fileItem);
-                });
-            }
-            
-            // --- Chat Submission ---
+        }
+        
+        if(chatForm){
             chatForm.addEventListener('submit', async function(event) {
                 event.preventDefault();
                 const userPrompt = promptInput.value.trim();
@@ -219,37 +236,37 @@ HTML_TEMPLATE = """
                     }
                 } catch (error) { modelBubble.querySelector('p').innerText = "エラーが発生しました: " + error; }
             });
+        }
 
-            function appendMessage(text, role) {
-                const messageDiv = document.createElement('div'); messageDiv.className = `message ${role}-message`;
-                const bubbleDiv = document.createElement('div'); bubbleDiv.className = 'message-bubble';
-                const p = document.createElement('p'); p.innerText = text;
-                bubbleDiv.appendChild(p); messageDiv.appendChild(bubbleDiv); chatHistory.appendChild(messageDiv);
-                chatHistory.scrollTop = chatHistory.scrollHeight;
-                return bubbleDiv;
-            }
-
-            // --- Initial Load ---
-            loadSettings();
+        function appendMessage(text, role) {
+            const messageDiv = document.createElement('div'); messageDiv.className = `message ${role}-message`;
+            const bubbleDiv = document.createElement('div'); bubbleDiv.className = 'message-bubble';
+            const p = document.createElement('p'); p.innerText = text;
+            bubbleDiv.appendChild(p); messageDiv.appendChild(bubbleDiv); chatHistory.appendChild(messageDiv);
             chatHistory.scrollTop = chatHistory.scrollHeight;
+            return bubbleDiv;
+        }
+        
+        const themeToggle = document.getElementById('theme-toggle');
+        themeToggle.addEventListener('click', () => {
+            document.body.classList.toggle('dark-mode');
+            localStorage.setItem('theme', document.body.classList.contains('dark-mode') ? 'dark' : 'light');
+        });
+        document.addEventListener('DOMContentLoaded', () => {
+            if (localStorage.getItem('theme') === 'dark') { document.body.classList.add('dark-mode'); }
+            loadSettings();
+            if(chatHistory) chatHistory.scrollTop = chatHistory.scrollHeight;
         });
     </script>
 </body>
 </html>
 """
 
-# --- 5. Python Backend with simplified, robust logic ---
-# --- Google OAuth Routes ---
+# --- 5. Python Backend Routes ---
 @app.route('/login')
 def login():
-    if not (GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET and REDIRECT_URI):
-        return "OAuth is not configured.", 500
-    os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
-    flow = Flow.from_client_config(
-        client_config={ "web": { "client_id": GOOGLE_CLIENT_ID, "client_secret": GOOGLE_CLIENT_SECRET, "auth_uri": "https://accounts.google.com/o/oauth2/auth", "token_uri": "https://oauth2.googleapis.com/token", "redirect_uris": [REDIRECT_URI] }},
-        scopes=["openid", "https://www.googleapis.com/auth/userinfo.email", "https://www.googleapis.com/auth/userinfo.profile"],
-        redirect_uri=REDIRECT_URI
-    )
+    flow = get_oauth_flow()
+    if not flow: return "OAuth 2.0 has not been configured in the server environment.", 500
     authorization_url, state = flow.authorization_url()
     session['state'] = state
     return redirect(authorization_url)
@@ -261,16 +278,10 @@ def logout():
 
 @app.route('/callback')
 def callback():
-    if not (GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET and REDIRECT_URI):
-        return "OAuth is not configured.", 500
-    os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
-    flow = Flow.from_client_config(
-        client_config={ "web": { "client_id": GOOGLE_CLIENT_ID, "client_secret": GOOGLE_CLIENT_SECRET, "auth_uri": "https://accounts.google.com/o/oauth2/auth", "token_uri": "https://oauth2.googleapis.com/token", "redirect_uris": [REDIRECT_URI] }},
-        scopes=["openid", "https://www.googleapis.com/auth/userinfo.email", "https://www.googleapis.com/auth/userinfo.profile"],
-        redirect_uri=REDIRECT_URI, state=session["state"]
-    )
+    flow = get_oauth_flow()
+    if not flow: return "OAuth 2.0 has not been configured in the server environment.", 500
     try:
-        flow.fetch_token(authorization_response=request.url)
+        flow.fetch_token(authorization_response=request.url, state=session["state"])
         creds = flow.credentials
         user_info_response = requests.get('https://www.googleapis.com/oauth2/v1/userinfo', headers={'Authorization': f'Bearer {creds.token}'})
         user_info = user_info_response.json()
@@ -280,18 +291,20 @@ def callback():
         print(f"Error during OAuth callback: {e}")
     return redirect(url_for('home'))
 
-# --- Main App Routes ---
 @app.route('/', methods=['GET'])
 def home():
     user_data = session.get('name')
     history = []
-    db = get_db()
     if 'google_id' in session:
-        user_id = session['google_id']
-        docs = db.collection('users').document(user_id).collection('conversations').order_by('timestamp').limit(50).stream()
-        for doc in docs:
-            history.append(doc.to_dict())
-    # サーバーは単純にHTMLシェルと履歴を返すだけ。設定はJSがLocalStorageから読み込む。
+        try:
+            user_id = session['google_id']
+            db = get_db()
+            docs = db.collection('users').document(user_id).collection('conversations').order_by('timestamp').limit(50).stream()
+            for doc in docs:
+                history.append(doc.to_dict())
+        except Exception as e:
+            print(f"Error fetching history for user {session.get('google_id')}: {e}")
+            # エラーがあってもページは表示し続ける
     return render_template_string(HTML_TEMPLATE, user=user_data, history=history)
     
 @app.route('/stream_chat', methods=['POST'])
@@ -305,13 +318,14 @@ def stream_chat():
             system_instruction = data.get('system_instruction', "")
             knowledge_files = data.get('knowledge_files', [])
             
-            if not (genai and user_prompt):
+            genai_client = get_genai()
+            if not (genai_client and user_prompt):
                 yield "エラー: 設定が不十分か、プロンプトが空です。"
                 return
 
-            model = genai.GenerativeModel(
+            model = genai_client.GenerativeModel(
                 model_name=model_name,
-                generation_config=genai.GenerationConfig(temperature=temperature),
+                generation_config=genai.GenerativeModel.GenerationConfig(temperature=temperature),
                 system_instruction=system_instruction,
             )
             final_prompt = user_prompt
@@ -328,7 +342,6 @@ def stream_chat():
                     full_ai_response += chunk.text
                     yield chunk.text
             
-            # ログインしている場合のみ会話ログをDBに保存
             if 'google_id' in session:
                 user_id = session['google_id']
                 db = get_db()
