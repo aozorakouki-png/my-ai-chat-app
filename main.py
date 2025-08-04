@@ -83,8 +83,6 @@ HTML_TEMPLATE = """
     .login-btn { background-color: #4285F4; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; }
     .user-info { padding: 10px; text-align: center; border-bottom: 1px solid var(--border-color); font-size: 12px;}
     .deep-think-toggle { margin-top: 15px; display: flex; align-items: center; }
-    /* ▼▼▼ New Button Style ▼▼▼ */
-    .action-btn { background-color: #28a745; color: white; border: none; border-radius: 5px; padding: 8px; margin-top: 10px; cursor: pointer; width: 100%; }
 </style></head>
 <body>
     <div class="theme-toggle" id="theme-toggle">🌓</div>
@@ -112,7 +110,6 @@ HTML_TEMPLATE = """
                 <textarea id="system_instruction" name="system_instruction" rows="6"></textarea>
                 <label for="knowledge_file">知識ファイル (最大10件):</label>
                 <input type="file" id="knowledge_file" name="knowledge_file" accept=".txt" multiple>
-                <button type="button" id="log-to-knowledge-btn" class="action-btn">現在の会話を知識化</button>
                 <div id="file-list"></div>
             </div>
         </div>
@@ -155,7 +152,6 @@ HTML_TEMPLATE = """
                 const chatHistory = document.getElementById('chat-history');
                 const fileInput = document.getElementById('knowledge_file');
                 const fileListDiv = document.getElementById('file-list');
-                const logToKnowledgeBtn = document.getElementById('log-to-knowledge-btn');
                 let knowledgeFiles = [];
 
                 function saveSettings() {
@@ -213,27 +209,6 @@ HTML_TEMPLATE = """
                     event.target.value = '';
                 });
 
-                // ▼▼▼ New Function: Log to Knowledge ▼▼▼
-                logToKnowledgeBtn.addEventListener('click', () => {
-                    if (knowledgeFiles.length >= 10) {
-                        alert("知識ファイルが上限の10個に達しています。");
-                        return;
-                    }
-                    let logText = "以下は、これまでの会話の記録です。\\n\\n";
-                    const messages = document.querySelectorAll('.chat-history .message');
-                    messages.forEach(msg => {
-                        const role = msg.classList.contains('user-message') ? 'User' : 'AI';
-                        const text = msg.querySelector('p').innerText;
-                        logText += `${role}: ${text}\\n`;
-                    });
-
-                    const logFileName = `conversation_log_${new Date().getTime()}.txt`;
-                    knowledgeFiles.push({ name: logFileName, content: logText });
-                    renderFileList();
-                    saveSettings();
-                    alert(`「${logFileName}」として会話ログを知識ファイルに追加しました。`);
-                });
-
                 function renderFileList() {
                     fileListDiv.innerHTML = '';
                     knowledgeFiles.forEach((file, index) => {
@@ -255,13 +230,23 @@ HTML_TEMPLATE = """
                     
                     saveSettings();
                     
+                    // ▼▼▼ New: Get current chat history as text ▼▼▼
+                    let historyText = "";
+                    const messages = document.querySelectorAll('.chat-history .message');
+                    messages.forEach(msg => {
+                        const role = msg.classList.contains('user-message') ? 'User' : 'AI';
+                        const text = msg.querySelector('p').innerText;
+                        historyText += `${role}: ${text}\\n`;
+                    });
+
                     const payload = {
                         prompt: userPrompt,
                         model_name: document.getElementById('model_name').value,
                         temperature: document.getElementById('temperature').value,
                         system_instruction: document.getElementById('system_instruction').value,
                         knowledge_files: knowledgeFiles,
-                        deep_think_mode: document.getElementById('deep_think_mode').checked
+                        deep_think_mode: document.getElementById('deep_think_mode').checked,
+                        history_text: historyText // Send history text to backend
                     };
                     
                     try {
@@ -362,6 +347,7 @@ def stream_chat():
                 system_instruction = data.get('system_instruction', "")
 
             knowledge_files = data.get('knowledge_files', [])
+            history_text = data.get('history_text', '') // Get history text from payload
             genai_client = get_genai()
             if not (genai_client and user_prompt):
                 yield "エラー: GEMINI_API_KEYが設定されていないか、プロンプトが空です。"
@@ -372,11 +358,25 @@ def stream_chat():
                 generation_config=genai.GenerativeModel.GenerationConfig(temperature=temperature),
                 system_instruction=system_instruction,
             )
-            final_prompt = user_prompt
-            if knowledge_files:
-                combined_content = "\\n\\n".join([f"--- File: {f['name']} ---\\n{f['content']}" for f in knowledge_files])
-                final_prompt = f"以下の知識ファイルを元に回答してください。\\n---知識ファイル---\\n{combined_content}\\n--------------\\nユーザーの質問: {user_prompt}"
             
+            # ▼▼▼ New: Combine knowledge files and history text ▼▼▼
+            final_prompt = user_prompt
+            context_header = ""
+            context_body = ""
+
+            if knowledge_files:
+                context_header += "知識ファイル"
+                context_body += "\\n\\n".join([f"--- File: {f['name']} ---\\n{f['content']}" for f in knowledge_files])
+
+            if history_text:
+                if context_header: context_header += "と"
+                context_header += "これまでの会話履歴"
+                if context_body: context_body += "\\n\\n"
+                context_body += f"--- 会話履歴 ---\\n{history_text}"
+
+            if context_header:
+                final_prompt = f"以下の{context_header}を元に回答してください。\\n{context_body}\\n--------------\\nユーザーの質問: {user_prompt}"
+
             chat = model.start_chat(history=[])
             response_stream = chat.send_message(final_prompt, stream=True)
             
