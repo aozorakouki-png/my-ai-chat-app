@@ -155,14 +155,14 @@ HTML_TEMPLATE = """
             function loadSettings() {
                 const savedSettings = JSON.parse(localStorage.getItem('ai_settings')) || {};
                 const savedFiles = JSON.parse(localStorage.getItem('knowledge_files')) || [];
-                const models = ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-1.0-pro'];
+                const models = ['gemini-2.5-pro', 'gemini-1.5-pro', 'gemini-1.0-pro'];
                 const modelSelect = document.getElementById('model_name');
                 modelSelect.innerHTML = '';
                 models.forEach(model => {
                     const option = document.createElement('option');
                     option.value = model;
                     option.text = model.replace(/gemini-|-pro|-flash/g, m => ({'gemini-': 'Gemini ', '-pro': ' Pro', '-flash': ' Flash'})[m]);
-                    if (model === (savedSettings.model_name || 'gemini-1.5-flash')) { option.selected = true; }
+                    if (model === (savedSettings.model_name || 'gemini-2.5-pro')) { option.selected = true; }
                     modelSelect.appendChild(option);
                 });
                 document.getElementById('temperature').value = savedSettings.temperature || 1.0;
@@ -308,7 +308,7 @@ def stream_chat():
         try:
             data = request.get_json()
             user_prompt = data.get('prompt', "")
-            model_name = data.get('model_name', 'gemini-1.5-flash')
+            model_name = data.get('model_name', 'gemini-2.5-pro')
             temperature = float(data.get('temperature', 1.0))
             system_instruction = data.get('system_instruction', "")
             knowledge_files = data.get('knowledge_files', [])
