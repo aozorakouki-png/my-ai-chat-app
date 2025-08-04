@@ -353,7 +353,7 @@ def stream_chat():
             
             is_deep_think = data.get('deep_think_mode', False)
             if is_deep_think:
-                model_name = 'gemini-1.5-pro'
+                model_name = 'gemini-2.5-pro'
                 temperature = 0.5
                 system_instruction = "あなたは非常に慎重で論理的な専門家です。ユーザーの質問に対して、まず背景、複数の視点、そして段階的な思考プロセスを内部で整理してください。その上で、最も論理的で包括的な回答を生成してください。"
             else:
