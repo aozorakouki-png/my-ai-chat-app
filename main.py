@@ -1,6 +1,7 @@
 import os
 import datetime
 import json
+import requests
 from flask import Flask, request, render_template_string, redirect, url_for, Response, stream_with_context, session, abort
 
 # --- 1. Initial Setup ---
@@ -9,6 +10,9 @@ app.secret_key = os.environ.get('FLASK_SECRET_KEY', 'a-very-secret-key-for-local
 
 # --- 2. Load Configuration from Environment Variables ---
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
+GOOGLE_CLIENT_ID = os.environ.get('GOOGLE_CLIENT_ID')
+GOOGLE_CLIENT_SECRET = os.environ.get('GOOGLE_CLIENT_SECRET')
+REDIRECT_URI = os.environ.get('REDIRECT_URI')
 
 # --- 3. Lazy Initializers ---
 db_client = None
@@ -31,6 +35,22 @@ def get_genai():
             except ImportError:
                 pass
     return genai_client
+
+def get_oauth_flow():
+    if not (GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET and REDIRECT_URI):
+        return None
+    from google_auth_oauthlib.flow import Flow
+    os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
+    return Flow.from_client_config(
+        client_config={ "web": {
+            "client_id": GOOGLE_CLIENT_ID, "client_secret": GOOGLE_CLIENT_SECRET,
+            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "redirect_uris": [REDIRECT_URI],
+        }},
+        scopes=["openid", "https://www.googleapis.com/auth/userinfo.email", "https://www.googleapis.com/auth/userinfo.profile"],
+        redirect_uri=REDIRECT_URI
+    )
 
 # --- 4. HTML Template ---
 HTML_TEMPLATE = """
@@ -59,12 +79,23 @@ HTML_TEMPLATE = """
     .file-item span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-right: 5px;}
     .file-item button { background: #dc3545; color: white; border: none; border-radius: 4px; padding: 1px 6px; font-size: 12px; cursor: pointer; }
     .theme-toggle { position: fixed; top: 10px; right: 10px; cursor: pointer; font-size: 24px; z-index: 100; }
+    .login-container { text-align: center; padding-top: 50px; }
+    .login-btn { background-color: #4285F4; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; }
+    .user-info { padding: 10px; text-align: center; border-bottom: 1px solid var(--border-color); font-size: 12px;}
     .deep-think-toggle { margin-top: 15px; display: flex; align-items: center; }
 </style></head>
 <body>
     <div class="theme-toggle" id="theme-toggle">🌓</div>
     <div class="wrapper">
         <div class="sidebar">
+            <div class="user-info">
+                {% if user %}
+                    <p>{{ user.name }}としてログイン中</p>
+                    <a href="/logout">ログアウト</a>
+                {% else %}
+                    <a href="/login" class="login-btn">Googleでログイン</a>
+                {% endif %}
+            </div>
             <h2>設定</h2>
             <div id="config-form">
                 <div class="deep-think-toggle">
@@ -83,25 +114,30 @@ HTML_TEMPLATE = """
             </div>
         </div>
         <div class="chat-wrapper">
-            <div class="chat-history" id="chat-history">
+             {% if not user %}
+                <div class="login-container">
+                    <h2>ようこそ</h2>
+                    <p>全ての機能を利用するには、Googleアカウントでログインしてください。</p>
                 </div>
-            <div class="input-area">
-                <form id="chat-form"><textarea name="prompt" placeholder="メッセージを入力..." required></textarea><button type="submit">↑</button></form>
-            </div>
+             {% else %}
+                <div class="chat-history" id="chat-history">
+                    {% for item in history %}
+                    <div class="message {% if item.role == 'user' %}user-message{% else %}model-message{% endif %}">
+                        <div class="message-bubble"><p>{{ item.text }}</p></div>
+                    </div>
+                    {% endfor %}
+                </div>
+                <div class="input-area">
+                    <form id="chat-form"><textarea name="prompt" placeholder="メッセージを入力..." required></textarea><button type="submit">↑</button></form>
+                </div>
+             {% endif %}
         </div>
     </div>
     <script>
         document.addEventListener('DOMContentLoaded', () => {
-            const chatForm = document.getElementById('chat-form');
-            const promptInput = chatForm.querySelector('textarea[name="prompt"]');
-            const chatHistory = document.getElementById('chat-history');
-            const fileInput = document.getElementById('knowledge_file');
-            const fileListDiv = document.getElementById('file-list');
+            const isLoggedIn = {{ 'true' if user else 'false' }};
             const themeToggle = document.getElementById('theme-toggle');
-            let knowledgeFiles = [];
-            let conversationHistory = []; // 会話履歴を保持する配列
 
-            // --- Theme Management ---
             themeToggle.addEventListener('click', () => {
                 document.body.classList.toggle('dark-mode');
                 localStorage.setItem('theme', document.body.classList.contains('dark-mode') ? 'dark' : 'light');
@@ -110,152 +146,187 @@ HTML_TEMPLATE = """
                 document.body.classList.add('dark-mode');
             }
 
-            // --- Settings Management ---
-            function saveState() {
-                const settings = {
-                    model_name: document.getElementById('model_name').value,
-                    temperature: document.getElementById('temperature').value,
-                    system_instruction: document.getElementById('system_instruction').value,
-                    deep_think_mode: document.getElementById('deep_think_mode').checked
-                };
-                localStorage.setItem('ai_settings', JSON.stringify(settings));
-                localStorage.setItem('knowledge_files', JSON.stringify(knowledgeFiles));
-                localStorage.setItem('conversation_history', JSON.stringify(conversationHistory));
-            }
+            if (isLoggedIn) {
+                const chatForm = document.getElementById('chat-form');
+                const promptInput = chatForm.querySelector('textarea[name="prompt"]');
+                const chatHistory = document.getElementById('chat-history');
+                const fileInput = document.getElementById('knowledge_file');
+                const fileListDiv = document.getElementById('file-list');
+                let knowledgeFiles = [];
 
-            function loadState() {
-                const savedSettings = JSON.parse(localStorage.getItem('ai_settings')) || {};
-                const savedFiles = JSON.parse(localStorage.getItem('knowledge_files')) || [];
-                const savedHistory = JSON.parse(localStorage.getItem('conversation_history')) || [];
-                
-                const models = ['gemini-1.5-flash', 'gemini-2.5-pro', 'gemini-1.0-pro'];
-                const modelSelect = document.getElementById('model_name');
-                modelSelect.innerHTML = '';
-                models.forEach(model => {
-                    const option = document.createElement('option');
-                    option.value = model;
-                    option.text = model.replace(/gemini-|-pro|-flash/g, m => ({'gemini-': 'Gemini ', '-pro': ' Pro', '-flash': ' Flash'})[m]);
-                    if (model === (savedSettings.model_name || 'gemini-1.5-flash')) { option.selected = true; }
-                    modelSelect.appendChild(option);
-                });
-                document.getElementById('temperature').value = savedSettings.temperature || 1.0;
-                document.getElementById('system_instruction').value = savedSettings.system_instruction || 'あなたは親切で優秀なAIアシスタントです。';
-                document.getElementById('deep_think_mode').checked = savedSettings.deep_think_mode || false;
-                
-                knowledgeFiles = savedFiles;
-                renderFileList();
-                
-                conversationHistory = savedHistory;
-                renderHistory();
-            }
-            
-            function renderHistory() {
-                chatHistory.innerHTML = '';
-                conversationHistory.forEach(msg => appendMessage(msg.text, msg.role, false));
-            }
-
-            ['model_name', 'temperature', 'system_instruction', 'deep_think_mode'].forEach(id => {
-                const el = document.getElementById(id);
-                el.addEventListener('change', saveState);
-                el.addEventListener('input', saveState);
-            });
-
-            // --- File Management ---
-            fileInput.addEventListener('change', (event) => {
-                const newFiles = Array.from(event.target.files);
-                if (knowledgeFiles.length + newFiles.length > 10) { alert("ファイルは合計10個までです。"); return; }
-                newFiles.forEach(file => {
-                    if (!knowledgeFiles.some(f => f.name === file.name)) {
-                        const reader = new FileReader();
-                        reader.onload = (e) => {
-                            knowledgeFiles.push({ name: file.name, content: e.target.result });
-                            renderFileList();
-                            saveState();
-                        };
-                        reader.readAsText(file, 'UTF-8');
-                    }
-                });
-                event.target.value = '';
-            });
-
-            function renderFileList() {
-                fileListDiv.innerHTML = '';
-                knowledgeFiles.forEach((file, index) => {
-                    const fileItem = document.createElement('div'); fileItem.className = 'file-item';
-                    const fileNameSpan = document.createElement('span'); fileNameSpan.innerText = file.name;
-                    const deleteBtn = document.createElement('button'); deleteBtn.innerText = '×';
-                    deleteBtn.onclick = () => { knowledgeFiles.splice(index, 1); renderFileList(); saveState(); };
-                    fileItem.appendChild(fileNameSpan); fileItem.appendChild(deleteBtn); fileListDiv.appendChild(fileItem);
-                });
-            }
-            
-            // --- Chat Submission ---
-            chatForm.addEventListener('submit', async function(event) {
-                event.preventDefault();
-                const userPrompt = promptInput.value.trim();
-                if (!userPrompt) return;
-                
-                appendMessage(userPrompt, 'user', true); // Add to UI and history array
-                promptInput.value = ''; promptInput.style.height = 'auto';
-                const modelBubble = appendMessage('...', 'model', false); // Add placeholder to UI only
-                
-                const payload = {
-                    prompt: userPrompt,
-                    model_name: document.getElementById('model_name').value,
-                    temperature: document.getElementById('temperature').value,
-                    system_instruction: document.getElementById('system_instruction').value,
-                    knowledge_files: knowledgeFiles,
-                    deep_think_mode: document.getElementById('deep_think_mode').checked,
-                    history: conversationHistory.slice(0, -1) // Send all history except the current user prompt
-                };
-                
-                try {
-                    const response = await fetch('/stream_chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-                    if (!response.ok) throw new Error(`Server error: ${response.status} ${await response.text()}`);
-                    const reader = response.body.getReader();
-                    const decoder = new TextDecoder();
-                    let fullResponse = "";
-                    modelBubble.querySelector('p').innerText = "";
-                    while (true) {
-                        const { value, done } = await reader.read();
-                        if (done) break;
-                        const chunk = decoder.decode(value, {stream: true});
-                        fullResponse += chunk;
-                        modelBubble.querySelector('p').innerText = fullResponse;
-                        chatHistory.scrollTop = chatHistory.scrollHeight;
-                    }
-                    // Add final AI response to history array and save
-                    conversationHistory.push({ role: 'model', text: fullResponse });
-                    saveState();
-                } catch (error) { modelBubble.querySelector('p').innerText = "エラーが発生しました: " + error; }
-            });
-
-            function appendMessage(text, role, addToHistoryArray) {
-                if(addToHistoryArray) {
-                    conversationHistory.push({ role: role, text: text });
-                    saveState();
+                function saveSettings() {
+                    const settings = {
+                        model_name: document.getElementById('model_name').value,
+                        temperature: document.getElementById('temperature').value,
+                        system_instruction: document.getElementById('system_instruction').value,
+                        deep_think_mode: document.getElementById('deep_think_mode').checked
+                    };
+                    localStorage.setItem('ai_settings', JSON.stringify(settings));
+                    localStorage.setItem('knowledge_files', JSON.stringify(knowledgeFiles));
                 }
-                const messageDiv = document.createElement('div'); messageDiv.className = `message ${role}-message`;
-                const bubbleDiv = document.createElement('div'); bubbleDiv.className = 'message-bubble';
-                const p = document.createElement('p'); p.innerText = text;
-                bubbleDiv.appendChild(p); messageDiv.appendChild(bubbleDiv); chatHistory.appendChild(messageDiv);
-                chatHistory.scrollTop = chatHistory.scrollHeight;
-                return bubbleDiv;
-            }
 
-            // --- Initial Load ---
-            loadState();
+                function loadSettings() {
+                    const savedSettings = JSON.parse(localStorage.getItem('ai_settings')) || {};
+                    const savedFiles = JSON.parse(localStorage.getItem('knowledge_files')) || [];
+                    
+                    const models = ['gemini-1.5-flash', 'gemini-2.5-pro', 'gemini-1.0-pro'];
+                    const modelSelect = document.getElementById('model_name');
+                    modelSelect.innerHTML = '';
+                    models.forEach(model => {
+                        const option = document.createElement('option');
+                        option.value = model;
+                        option.text = model.replace(/gemini-|-pro|-flash/g, m => ({'gemini-': 'Gemini ', '-pro': ' Pro', '-flash': ' Flash'})[m]);
+                        if (model === (savedSettings.model_name || 'gemini-1.5-flash')) { option.selected = true; }
+                        modelSelect.appendChild(option);
+                    });
+                    document.getElementById('temperature').value = savedSettings.temperature || 1.0;
+                    document.getElementById('system_instruction').value = savedSettings.system_instruction || 'あなたは親切で優秀なAIアシスタントです。';
+                    document.getElementById('deep_think_mode').checked = savedSettings.deep_think_mode || false;
+                    
+                    knowledgeFiles = savedFiles;
+                    renderFileList();
+                }
+
+                ['model_name', 'temperature', 'system_instruction', 'deep_think_mode'].forEach(id => {
+                    document.getElementById(id).addEventListener('change', saveSettings);
+                    document.getElementById(id).addEventListener('input', saveSettings);
+                });
+                
+                fileInput.addEventListener('change', (event) => {
+                    const newFiles = Array.from(event.target.files);
+                    if (knowledgeFiles.length + newFiles.length > 10) { alert("ファイルは合計10個までです。"); return; }
+                    newFiles.forEach(file => {
+                        if (!knowledgeFiles.some(f => f.name === file.name)) {
+                            const reader = new FileReader();
+                            reader.onload = (e) => {
+                                knowledgeFiles.push({ name: file.name, content: e.target.result });
+                                renderFileList();
+                                saveSettings();
+                            };
+                            reader.readAsText(file, 'UTF-8');
+                        }
+                    });
+                    event.target.value = '';
+                });
+
+                function renderFileList() {
+                    fileListDiv.innerHTML = '';
+                    knowledgeFiles.forEach((file, index) => {
+                        const fileItem = document.createElement('div'); fileItem.className = 'file-item';
+                        const fileNameSpan = document.createElement('span'); fileNameSpan.innerText = file.name;
+                        const deleteBtn = document.createElement('button'); deleteBtn.innerText = '×';
+                        deleteBtn.onclick = () => { knowledgeFiles.splice(index, 1); renderFileList(); saveSettings(); };
+                        fileItem.appendChild(fileNameSpan); fileItem.appendChild(deleteBtn); fileListDiv.appendChild(fileItem);
+                    });
+                }
+                
+                chatForm.addEventListener('submit', async function(event) {
+                    event.preventDefault();
+                    const userPrompt = promptInput.value.trim();
+                    if (!userPrompt) return;
+                    appendMessage(userPrompt, 'user');
+                    promptInput.value = ''; promptInput.style.height = 'auto';
+                    const modelBubble = appendMessage('...', 'model');
+                    
+                    saveSettings();
+                    
+                    let historyText = "";
+                    const messages = document.querySelectorAll('.chat-history .message');
+                    messages.forEach(msg => {
+                        const role = msg.classList.contains('user-message') ? 'User' : 'AI';
+                        const text = msg.querySelector('p').innerText;
+                        historyText += `${role}: ${text}\\n`;
+                    });
+
+                    const payload = {
+                        prompt: userPrompt,
+                        model_name: document.getElementById('model_name').value,
+                        temperature: document.getElementById('temperature').value,
+                        system_instruction: document.getElementById('system_instruction').value,
+                        knowledge_files: knowledgeFiles,
+                        deep_think_mode: document.getElementById('deep_think_mode').checked,
+                        history_text: historyText
+                    };
+                    
+                    try {
+                        const response = await fetch('/stream_chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+                        if (!response.ok) throw new Error(`Server error: ${response.status} ${await response.text()}`);
+                        const reader = response.body.getReader();
+                        const decoder = new TextDecoder();
+                        let fullResponse = "";
+                        modelBubble.querySelector('p').innerText = "";
+                        while (true) {
+                            const { value, done } = await reader.read();
+                            if (done) break;
+                            const chunk = decoder.decode(value, {stream: true});
+                            fullResponse += chunk;
+                            modelBubble.querySelector('p').innerText = fullResponse;
+                            chatHistory.scrollTop = chatHistory.scrollHeight;
+                        }
+                    } catch (error) { modelBubble.querySelector('p').innerText = "エラーが発生しました: " + error; }
+                });
+
+                function appendMessage(text, role) {
+                    const messageDiv = document.createElement('div'); messageDiv.className = `message ${role}-message`;
+                    const bubbleDiv = document.createElement('div'); bubbleDiv.className = 'message-bubble';
+                    const p = document.createElement('p'); p.innerText = text;
+                    bubbleDiv.appendChild(p); messageDiv.appendChild(bubbleDiv); chatHistory.appendChild(messageDiv);
+                    chatHistory.scrollTop = chatHistory.scrollHeight;
+                    return bubbleDiv;
+                }
+
+                loadSettings();
+                chatHistory.scrollTop = chatHistory.scrollHeight;
+            }
         });
     </script>
 </body>
 </html>
 """
 
-# --- 5. Python Backend ---
+# --- 5. Python Backend Routes ---
+@app.route('/login')
+def login():
+    flow = get_oauth_flow()
+    if not flow: return "OAuth is not configured.", 500
+    authorization_url, state = flow.authorization_url()
+    session['state'] = state
+    return redirect(authorization_url)
+
+@app.route('/logout')
+def logout():
+    session.clear()
+    return redirect(url_for('home'))
+
+@app.route('/callback')
+def callback():
+    flow = get_oauth_flow()
+    if not flow: return "OAuth is not configured.", 500
+    try:
+        flow.fetch_token(authorization_response=request.url, state=session["state"])
+        creds = flow.credentials
+        user_info_response = requests.get('https://www.googleapis.com/oauth2/v1/userinfo', headers={'Authorization': f'Bearer {creds.token}'})
+        user_info = user_info_response.json()
+        session['google_id'] = user_info['id']
+        session['name'] = user_info['name']
+    except Exception as e:
+        print(f"Error during OAuth callback: {e}")
+    return redirect(url_for('home'))
+
 @app.route('/', methods=['GET'])
 def home():
-    # サーバー側は単純にHTMLを返すだけ。ログイン機能は削除。
-    return render_template_string(HTML_TEMPLATE)
+    user_data = session.get('name')
+    history = []
+    if 'google_id' in session:
+        try:
+            user_id = session['google_id']
+            db = get_db()
+            docs = db.collection('users').document(user_id).collection('conversations').order_by('timestamp').limit(50).stream()
+            for doc in docs:
+                history.append(doc.to_dict())
+        except Exception as e:
+            print(f"Error fetching history for user {session.get('google_id')}: {e}")
+    return render_template_string(HTML_TEMPLATE, user=user_data, history=history)
     
 @app.route('/stream_chat', methods=['POST'])
 def stream_chat():
@@ -275,8 +346,9 @@ def stream_chat():
                 system_instruction = data.get('system_instruction', "")
 
             knowledge_files = data.get('knowledge_files', [])
-            history = data.get('history', []) # Get history from payload
+            history_text = data.get('history_text', '')
             
+            # ▼▼▼ BUG FIX: Use the get_genai() function to get the client ▼▼▼
             genai_client = get_genai()
             if not (genai_client and user_prompt):
                 yield "エラー: GEMINI_API_KEYが設定されていないか、プロンプトが空です。"
@@ -284,29 +356,44 @@ def stream_chat():
 
             model = genai_client.GenerativeModel(
                 model_name=model_name,
-                generation_config=genai.GenerativeModel.GenerationConfig(temperature=temperature),
+                # ▼▼▼ BUG FIX: Access GenerationConfig through the client instance ▼▼▼
+                generation_config=genai_client.GenerationConfig(temperature=temperature),
                 system_instruction=system_instruction,
             )
             
-            # Format history for the API
-            api_history = []
-            for item in history:
-                role = 'user' if item['role'] == 'user' else 'model'
-                api_history.append({'role': role, 'parts': [{'text': item['text']}]})
-
-            chat = model.start_chat(history=api_history)
-            
             final_prompt = user_prompt
+            context_header = ""
+            context_body = ""
+
             if knowledge_files:
-                combined_content = "\\n\\n".join([f"--- File: {f['name']} ---\\n{f['content']}" for f in knowledge_files])
-                final_prompt = f"以下の知識ファイルを元に回答してください。\\n---知識ファイル---\\n{combined_content}\\n--------------\\nユーザーの質問: {user_prompt}"
-            
+                context_header += "知識ファイル"
+                context_body += "\\n\\n".join([f"--- File: {f['name']} ---\\n{f['content']}" for f in knowledge_files])
+
+            if history_text:
+                if context_header: context_header += "と"
+                context_header += "これまでの会話履歴"
+                if context_body: context_body += "\\n\\n"
+                context_body += f"--- 会話履歴 ---\\n{history_text}"
+
+            if context_header:
+                final_prompt = f"以下の{context_header}を元に回答してください。\\n{context_body}\\n--------------\\nユーザーの質問: {user_prompt}"
+
+            chat = model.start_chat(history=[])
             response_stream = chat.send_message(final_prompt, stream=True)
             
+            full_ai_response = ""
             for chunk in response_stream:
                 if chunk.text:
+                    full_ai_response += chunk.text
                     yield chunk.text
             
+            if 'google_id' in session:
+                user_id = session['google_id']
+                db = get_db()
+                convo_ref = db.collection('users').document(user_id).collection('conversations')
+                utc_now = datetime.datetime.now(datetime.timezone.utc)
+                convo_ref.add({'role': 'user', 'text': user_prompt, 'timestamp': utc_now})
+                convo_ref.add({'role': 'model', 'text': full_ai_response, 'timestamp': utc_now + datetime.timedelta(microseconds=1)})
         except Exception as e:
             print(f"Error during generation: {e}")
             yield f"API呼び出し中にエラーが発生しました: {e}"
