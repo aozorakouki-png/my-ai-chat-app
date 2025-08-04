@@ -2,6 +2,3 @@ Flask
 gunicorn
 google-generativeai
 google-cloud-firestore
-google-auth
-google-auth-oauthlib
-requests
